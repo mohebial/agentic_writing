@@ -759,19 +759,42 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
+def _pick_pdf() -> str:
+    """Open a native file-picker dialog and return the chosen PDF path."""
+    import tkinter as tk
+    from tkinter import filedialog
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    path = filedialog.askopenfilename(
+        title="Select PDF grant application",
+        filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+    )
+    root.destroy()
+    if not path:
+        sys.exit("No file selected. Exiting.")
+    return path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Multi-Agent NIH Grant Peer Review System — Gemini Edition",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  python grant_review_gemini.py               # opens file picker\n"
             "  python grant_review_gemini.py proposal.pdf\n"
             "  python grant_review_gemini.py proposal.pdf --max-rounds 2\n"
             "  python grant_review_gemini.py proposal.pdf --model gemini-2.5-pro\n"
             "  python grant_review_gemini.py proposal.pdf --output summary.md\n"
         ),
     )
-    parser.add_argument("pdf", help="Path to the PDF grant application")
+    parser.add_argument(
+        "pdf",
+        nargs="?",
+        default=None,
+        help="Path to the PDF grant application (omit to open a file picker)",
+    )
     parser.add_argument(
         "--model", "-m",
         default=DEFAULT_MODEL,
@@ -788,14 +811,16 @@ def main() -> None:
         "--output", "-o",
         default=None,
         metavar="FILE",
-        help="Output markdown file (default: grant_review_gemini_<name>_<timestamp>.md)",
+        help="Output markdown file (default: <pdf_folder>/<name>_output.md)",
     )
     args = parser.parse_args()
 
+    if not args.pdf:
+        args.pdf = _pick_pdf()
+
     if not args.output:
-        stem = Path(args.pdf).stem
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        args.output = f"grant_review_gemini_{stem}_{ts}.md"
+        pdf = Path(args.pdf)
+        args.output = str(pdf.parent / f"{pdf.stem}_output.md")
 
     run(args.pdf, args.model, args.max_rounds, args.output)
 

@@ -663,25 +663,42 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
 
             # ── Terminal conditions ───────────────────────────────────────────
             if decision == "Fundable":
-                final = current_text or f"[See original PDF: {pdf.name}]"
-                log.append(f"\n## Final Revised Application\n\n{final}\n")
                 print(_banner("✓ APPLICATION DEEMED FUNDABLE", "═"))
+                if current_text:
+                    print(_banner("FINAL REVISED APPLICATION", "─"))
+                    print(current_text)
+                    print()
+                    log.append(f"\n# Final Revised Application\n\n{current_text}\n")
+                else:
+                    note = f"[Original PDF funded without revision: {pdf.name}]"
+                    print(note)
+                    log.append(f"\n# Final Revised Application\n\n{note}\n")
                 break
 
             if decision == "NRFC":
+                print(_banner("✗ NOT RECOMMENDED FOR FURTHER CONSIDERATION (NRFC)", "═"))
                 log.append(
                     f"\n**Application Not Recommended for Further Consideration "
                     f"after round {rnd}.**\n"
                 )
-                print(_banner("✗ NOT RECOMMENDED FOR FURTHER CONSIDERATION (NRFC)", "═"))
+                if current_text:
+                    print(_banner("Last Revised Application (NRFC)", "─"))
+                    print(current_text)
+                    print()
+                    log.append(f"\n# Last Revised Application\n\n{current_text}\n")
                 break
 
             if rnd == max_rounds:
+                print(_banner(f"MAX ROUNDS ({max_rounds}) REACHED — not yet fundable", "═"))
                 log.append(
                     f"\n**Stopped: max rounds ({max_rounds}) reached. "
                     f"Final decision: {decision}**\n"
                 )
-                print(_banner(f"MAX ROUNDS ({max_rounds}) REACHED — not yet fundable", "═"))
+                if current_text:
+                    print(_banner("Last Revised Application", "─"))
+                    print(current_text)
+                    print()
+                    log.append(f"\n# Last Revised Application\n\n{current_text}\n")
                 break
 
             # ── PI Revision ───────────────────────────────────────────────────
@@ -710,6 +727,22 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
             sections = _extract_revised_grant(pi_out)
             current_text = _build_revised_text(sections, fallback=pi_out)
             current_file_uri = None   # use text from round 2 onward
+
+            # ── Print revised sections prominently ────────────────────────────
+            print(_banner(f"Revised Application — Round {rnd}", "─"))
+            if sections.get("intro"):
+                print("── Introduction to Revised Application ──\n")
+                print(sections["intro"])
+                print()
+            if sections.get("aims"):
+                print("── Specific Aims ──\n")
+                print(sections["aims"])
+                print()
+            if sections.get("strategy"):
+                print("── Research Strategy ──\n")
+                print(sections["strategy"])
+                print()
+            record(f"Revised Application — Round {rnd}", current_text, level=2)
 
     finally:
         # ── Delete uploaded file from Gemini File API ─────────────────────────

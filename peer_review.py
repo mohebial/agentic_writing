@@ -507,22 +507,39 @@ def run(pdf_path: str, max_rounds: int, output_path: str) -> None:
 
             # ── Check terminal conditions ─────────────────────────────────────
             if decision == "Accept":
-                final_ms = current_text or f"[See original PDF: {pdf.name}]"
-                log.append(f"\n## Final Manuscript\n\n{final_ms}\n")
                 print(_banner("✓ MANUSCRIPT ACCEPTED", "═"))
+                if current_text:
+                    print(_banner("FINAL ACCEPTED MANUSCRIPT", "─"))
+                    print(current_text)
+                    print()
+                    log.append(f"\n# Final Manuscript\n\n{current_text}\n")
+                else:
+                    note = f"[Original PDF accepted without revision: {pdf.name}]"
+                    print(note)
+                    log.append(f"\n# Final Manuscript\n\n{note}\n")
                 break
 
             if decision == "Reject":
-                log.append(f"\n**Manuscript rejected after round {rnd}.**\n")
                 print(_banner("✗ MANUSCRIPT REJECTED", "═"))
+                log.append(f"\n**Manuscript rejected after round {rnd}.**\n")
+                if current_text:
+                    print(_banner("Last Revised Manuscript (Rejected)", "─"))
+                    print(current_text)
+                    print()
+                    log.append(f"\n# Last Revised Manuscript\n\n{current_text}\n")
                 break
 
             if rnd == max_rounds:
+                print(_banner(f"MAX ROUNDS ({max_rounds}) REACHED — not accepted", "═"))
                 log.append(
                     f"\n**Stopped: max rounds ({max_rounds}) reached. "
                     f"Final decision: {decision}**\n"
                 )
-                print(_banner(f"MAX ROUNDS ({max_rounds}) REACHED — not accepted", "═"))
+                if current_text:
+                    print(_banner("Last Revised Manuscript", "─"))
+                    print(current_text)
+                    print()
+                    log.append(f"\n# Last Revised Manuscript\n\n{current_text}\n")
                 break
 
             # ── Author revision ───────────────────────────────────────────────
@@ -547,9 +564,15 @@ def run(pdf_path: str, max_rounds: int, output_path: str) -> None:
             )
             record("Author Response & Revision", author_out)
 
-            # Prepare for next round
+            # Extract and display the revised manuscript
             current_text = _extract_manuscript(author_out)
             current_file_id = None  # switch to text from round 2 onward
+
+            # ── Print revised manuscript prominently ──────────────────────────
+            print(_banner(f"Revised Manuscript — Round {rnd}", "─"))
+            print(current_text)
+            print()
+            record(f"Revised Manuscript — Round {rnd}", current_text, level=2)
 
     finally:
         # ── Clean up uploaded file ────────────────────────────────────────────

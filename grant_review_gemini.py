@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import argparse
 from typing import Any
 from pathlib import Path
@@ -482,6 +483,11 @@ def _text_part(text: str) -> Any:
     return types.Part.from_text(text=text)
 
 
+# Retry intervals (seconds) for transient 503 errors on the same model.
+# After all retries are exhausted the fallback chain kicks in.
+_503_RETRY_DELAYS = [15, 30, 60]  # 3 attempts: wait 15 s, 30 s, 60 s
+
+
 def stream_agent(
     client: Any,
     model: str,
@@ -492,11 +498,13 @@ def stream_agent(
     """
     Stream a Gemini response to stdout and return (full_text, model_used).
 
-    On a 429 rate-limit error, automatically retries each model in
-    MODEL_FALLBACK_CHAIN (skipping any already tried) before giving up.
+    Error handling:
+    - 503 UNAVAILABLE (high demand): retry the same model up to 3 times with
+      increasing wait intervals (15 s / 30 s / 60 s) before falling through
+      to the next model in MODEL_FALLBACK_CHAIN.
+    - 429 RESOURCE_EXHAUSTED (quota): switch to the next model immediately
+      (waiting won't help for daily free-tier limits).
     """
-    # Build ordered list of models to attempt: requested model first,
-    # then any fallbacks not yet in the sequence.
     models_to_try: list[str] = [model] + [
         m for m in MODEL_FALLBACK_CHAIN if m != model
     ]
@@ -504,38 +512,52 @@ def stream_agent(
     last_exc: Exception | None = None
     for attempt_model in models_to_try:
         if attempt_model != model:
-            print(
-                f"\n[Rate limit] Switching from '{model}' "
-                f"→ '{attempt_model}'\n"
-            )
-        print(_banner(f"{label}  [model: {attempt_model}]"))
-        collected: list[str] = []
-        try:
-            for chunk in client.models.generate_content_stream(
-                model=attempt_model,
-                contents=[types.Content(parts=parts, role="user")],
-                config=_make_config(system),
-            ):
-                if chunk.text:
-                    print(chunk.text, end="", flush=True)
-                    collected.append(chunk.text)
-            print("\n")
-            return "".join(collected), attempt_model
-        except Exception as exc:  # noqa: BLE001
-            # 429 RESOURCE_EXHAUSTED → try next model in chain
-            is_429 = (
-                getattr(exc, "status_code", None) == 429
-                or "429" in str(exc)
-                or "RESOURCE_EXHAUSTED" in str(exc)
-            )
-            if is_429:
-                print(
-                    f"\n[Rate limit] '{attempt_model}' quota exhausted."
-                    + (" Trying next model…" if attempt_model != models_to_try[-1] else " No more fallbacks.")
-                )
-                last_exc = exc
-                continue
-            raise  # non-429 errors are re-raised immediately
+            print(f"\n[Fallback] Switching → '{attempt_model}'\n")
+
+        # ── Per-model retry loop (503 only) ───────────────────────────────
+        for retry_num in range(1 + len(_503_RETRY_DELAYS)):  # 1 initial + N retries
+            print(_banner(f"{label}  [model: {attempt_model}]"))
+            collected: list[str] = []
+            try:
+                for chunk in client.models.generate_content_stream(
+                    model=attempt_model,
+                    contents=[types.Content(parts=parts, role="user")],
+                    config=_make_config(system),
+                ):
+                    if chunk.text:
+                        print(chunk.text, end="", flush=True)
+                        collected.append(chunk.text)
+                print("\n")
+                return "".join(collected), attempt_model
+
+            except Exception as exc:  # noqa: BLE001
+                exc_str = str(exc)
+                status  = getattr(exc, "status_code", None)
+
+                is_503 = (status == 503 or "503" in exc_str or "UNAVAILABLE" in exc_str)
+                is_429 = (status == 429 or "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str)
+
+                if is_503 and retry_num < len(_503_RETRY_DELAYS):
+                    wait = _503_RETRY_DELAYS[retry_num]
+                    print(
+                        f"\n[503] '{attempt_model}' is under high demand. "
+                        f"Retrying in {wait} s… (attempt {retry_num + 1}/{len(_503_RETRY_DELAYS)})"
+                    )
+                    time.sleep(wait)
+                    continue  # retry same model
+
+                if is_503 or is_429:
+                    reason = "quota exhausted" if is_429 else "still unavailable after retries"
+                    more = attempt_model != models_to_try[-1]
+                    print(
+                        f"\n[Fallback] '{attempt_model}' {reason}."
+                        + (" Trying next model…" if more else " No more fallbacks.")
+                    )
+                    last_exc = exc
+                    break  # exit retry loop → try next model in chain
+
+                raise  # non-retryable error — propagate immediately
+            break  # success or unhandled break — don't retry
 
     raise RuntimeError(
         f"All models exhausted ({models_to_try}). Last error: {last_exc}"
@@ -1079,9 +1101,11 @@ def _convert_to_pdf(md_path: str, pdf_path: str) -> bool:
         else:
             print(f"[PDF] weasyprint error: {exc}. Trying reportlab fallback…", file=sys.stderr)
 
-    # ── Attempt 2: markdown + reportlab ──────────────────────────────────────
+    # ── Attempt 2: markdown → HTML → ReportLab flowables ─────────────────────
     try:
-        import textwrap
+        import re as _re
+        import html as _html_mod
+        from html.parser import HTMLParser as _HTMLParser
         import markdown as _md
         from reportlab.lib.pagesizes import LETTER  # type: ignore
         from reportlab.lib.units import inch  # type: ignore
@@ -1089,15 +1113,15 @@ def _convert_to_pdf(md_path: str, pdf_path: str) -> bool:
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # type: ignore
         from reportlab.platypus import (  # type: ignore
             SimpleDocTemplate, Paragraph, Spacer, HRFlowable,
-            Table, TableStyle, Preformatted,
+            Table, TableStyle, Preformatted, ListFlowable, ListItem,
         )
-        from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER  # type: ignore
+        from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT  # type: ignore
 
         NAVY   = colors.HexColor("#1a3a5c")
         BLUE   = colors.HexColor("#2563a8")
         LTBLUE = colors.HexColor("#eef4fb")
-        GREY   = colors.HexColor("#9aa3af")
         DARK   = colors.HexColor("#1e2126")
+        CODEBG = colors.HexColor("#f4f6f8")
 
         doc = SimpleDocTemplate(
             pdf_path,
@@ -1111,78 +1135,174 @@ def _convert_to_pdf(md_path: str, pdf_path: str) -> bool:
 
         base = getSampleStyleSheet()
         sty = {
-            "body":  ParagraphStyle("body",  parent=base["Normal"],
-                                    fontSize=10, leading=16, textColor=DARK,
-                                    alignment=TA_JUSTIFY, spaceAfter=6),
-            "h1":    ParagraphStyle("h1",    parent=base["Heading1"],
-                                    fontSize=16, textColor=NAVY, leading=22,
-                                    spaceBefore=20, spaceAfter=8,
-                                    borderPad=4, borderColor=BLUE,
-                                    borderWidth=0, underlineColor=BLUE),
-            "h2":    ParagraphStyle("h2",    parent=base["Heading2"],
-                                    fontSize=12, textColor=BLUE, leading=16,
-                                    spaceBefore=14, spaceAfter=6,
-                                    backColor=LTBLUE, leftIndent=-6,
-                                    borderPad=(4, 6, 4, 10)),
-            "h3":    ParagraphStyle("h3",    parent=base["Heading3"],
-                                    fontSize=10.5, textColor=NAVY, leading=15,
-                                    spaceBefore=10, spaceAfter=4, fontName="Helvetica-Bold"),
-            "code":  ParagraphStyle("code",  parent=base["Code"],
-                                    fontSize=8, leading=12, textColor=DARK,
-                                    backColor=colors.HexColor("#f4f6f8"),
-                                    leftIndent=10, rightIndent=10,
-                                    spaceBefore=4, spaceAfter=4),
-            "bullet":ParagraphStyle("bullet", parent=base["Normal"],
-                                    fontSize=10, leading=15, textColor=DARK,
-                                    leftIndent=18, spaceAfter=3,
-                                    bulletIndent=6),
+            "body":   ParagraphStyle("rl_body",   parent=base["Normal"],
+                                     fontSize=10, leading=16, textColor=DARK,
+                                     alignment=TA_JUSTIFY, spaceAfter=6),
+            "h1":     ParagraphStyle("rl_h1",     parent=base["Normal"],
+                                     fontSize=16, leading=22, textColor=NAVY,
+                                     fontName="Helvetica-Bold",
+                                     spaceBefore=20, spaceAfter=8,
+                                     borderPad=(4, 0, 6, 0),
+                                     borderColor=BLUE, borderWidth=0),
+            "h2":     ParagraphStyle("rl_h2",     parent=base["Normal"],
+                                     fontSize=12.5, leading=17, textColor=BLUE,
+                                     fontName="Helvetica-Bold",
+                                     spaceBefore=16, spaceAfter=6,
+                                     backColor=LTBLUE,
+                                     leftIndent=8, rightIndent=0,
+                                     borderPad=(5, 8, 5, 10),
+                                     borderColor=BLUE, borderWidth=2,
+                                     borderRadius=3),
+            "h3":     ParagraphStyle("rl_h3",     parent=base["Normal"],
+                                     fontSize=10.5, leading=15, textColor=NAVY,
+                                     fontName="Helvetica-Bold",
+                                     spaceBefore=10, spaceAfter=4),
+            "h4":     ParagraphStyle("rl_h4",     parent=base["Normal"],
+                                     fontSize=10, leading=14, textColor=DARK,
+                                     fontName="Helvetica-Bold",
+                                     spaceBefore=8, spaceAfter=3),
+            "bullet": ParagraphStyle("rl_bullet", parent=base["Normal"],
+                                     fontSize=10, leading=15, textColor=DARK,
+                                     leftIndent=14, spaceAfter=3),
+            "bq":     ParagraphStyle("rl_bq",     parent=base["Normal"],
+                                     fontSize=9.5, leading=14, textColor=DARK,
+                                     leftIndent=16, rightIndent=16,
+                                     backColor=colors.HexColor("#f0f6ff"),
+                                     spaceAfter=6, spaceBefore=4),
+            "code":   ParagraphStyle("rl_code",   parent=base["Code"],
+                                     fontSize=8, leading=12, textColor=DARK,
+                                     backColor=CODEBG,
+                                     leftIndent=10, rightIndent=10,
+                                     spaceBefore=4, spaceAfter=4),
         }
 
-        elems = []
+        # ── Convert markdown to HTML ─────────────────────────────────────────
+        html_body = _md.markdown(
+            md_text,
+            extensions=["tables", "fenced_code", "sane_lists", "nl2br"],
+        )
 
-        # Title banner (simulated with a table)
+        # ── HTML → inline RML helper ─────────────────────────────────────────
+        def _inner_html_to_rml(inner: str) -> str:
+            """Convert a fragment of HTML inline markup to ReportLab XML."""
+            # tags supported by Paragraph: <b>, <i>, <u>, <font>, <br/>
+            out = inner
+            out = _re.sub(r"<strong>(.*?)</strong>", r"<b>\1</b>", out, flags=_re.S)
+            out = _re.sub(r"<em>(.*?)</em>", r"<i>\1</i>", out, flags=_re.S)
+            out = _re.sub(r"<code>(.*?)</code>",
+                          lambda m: (
+                              f'<font name="Courier" size="8" color="#c0392b">'
+                              f'{_html_mod.escape(m.group(1))}</font>'
+                          ), out, flags=_re.S)
+            # strip any remaining HTML tags not understood by Paragraph
+            out = _re.sub(r"<(?!/?(?:b|i|u|br|font)\b)[^>]+>", "", out)
+            return out
+
+        # ── Walk the HTML block structure ────────────────────────────────────
+        class _BlockParser(_HTMLParser):
+            def __init__(self) -> None:
+                super().__init__()
+                self.elems: list = []
+                self._tag_stack: list[str] = []
+                self._buf: list[str] = []
+                self._list_items: list = []
+                self._in_pre = False
+                self._in_bq  = False
+
+            def _flush(self, style_key: str = "body") -> None:
+                raw = "".join(self._buf).strip()
+                self._buf = []
+                if not raw:
+                    return
+                rml = _inner_html_to_rml(raw)
+                target = self._list_items if self._tag_stack and self._tag_stack[-1] in ("ul", "ol") else self.elems
+                if style_key == "bullet":
+                    target.append(Paragraph(f"• {rml}", sty["bullet"]))
+                elif style_key == "bq":
+                    self.elems.append(Paragraph(rml, sty["bq"]))
+                else:
+                    self.elems.append(Paragraph(rml, sty.get(style_key, sty["body"])))
+
+            def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
+                self._tag_stack.append(tag)
+                if tag == "pre":
+                    self._in_pre = True
+                elif tag == "blockquote":
+                    self._in_bq = True
+                elif tag in ("ul", "ol"):
+                    self._list_items = []
+
+            def handle_endtag(self, tag: str) -> None:
+                if self._tag_stack and self._tag_stack[-1] == tag:
+                    self._tag_stack.pop()
+                if tag in ("p",):
+                    self._flush("bq" if self._in_bq else "body")
+                elif tag in ("h1", "h2", "h3", "h4", "h5", "h6"):
+                    lvl = tag  # e.g. "h2"
+                    self._flush(lvl if lvl in sty else "h3")
+                elif tag == "li":
+                    self._flush("bullet")
+                elif tag in ("ul", "ol"):
+                    if self._list_items:
+                        self.elems.extend(self._list_items)
+                        self._list_items = []
+                    self.elems.append(Spacer(1, 4))
+                elif tag == "pre":
+                    raw = "".join(self._buf).strip()
+                    self._buf = []
+                    self._in_pre = False
+                    # remove nested <code> tags
+                    raw = _re.sub(r"</?code[^>]*>", "", raw)
+                    raw = _html_mod.unescape(raw)
+                    self.elems.append(Preformatted(raw, sty["code"]))
+                elif tag == "blockquote":
+                    self._in_bq = False
+                elif tag == "hr":
+                    self.elems.append(
+                        HRFlowable(width="100%", thickness=0.5,
+                                   color=colors.HexColor("#c8d8ea"),
+                                   spaceAfter=8, spaceBefore=8)
+                    )
+
+            def handle_data(self, data: str) -> None:
+                self._buf.append(data)
+
+            def handle_entityref(self, name: str) -> None:
+                self._buf.append(_html_mod.unescape(f"&{name};"))
+
+            def handle_charref(self, name: str) -> None:
+                self._buf.append(_html_mod.unescape(f"&#{name};"))
+
+        parser = _BlockParser()
+        # Pre-process: expose self-closing <hr> to endtag handler
+        html_body = _re.sub(r"<hr\s*/?>", "<hr></hr>", html_body)
+        parser.feed(html_body)
+        parsed_elems = parser.elems
+
+        # ── Assemble document ────────────────────────────────────────────────
+        elems: list = []
+
+        # Title banner
         doc_date = datetime.now().strftime("%B %d, %Y")
         banner_data = [[
             Paragraph(
                 f'<font color="white" size="16"><b>NIH Grant Peer Review — Summary</b></font><br/>'
                 f'<font color="#a8c4e0" size="8">Generated {doc_date} · Multi-Agent Review System</font>',
-                ParagraphStyle("banner", parent=base["Normal"], leading=20),
+                ParagraphStyle("banner", parent=base["Normal"], leading=22,
+                               leftIndent=0, rightIndent=0),
             )
         ]]
         banner_tbl = Table(banner_data, colWidths=[doc.width])
         banner_tbl.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, -1), NAVY),
-            ("TOPPADDING",    (0, 0), (-1, -1), 16),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
-            ("LEFTPADDING",   (0, 0), (-1, -1), 20),
-            ("RIGHTPADDING",  (0, 0), (-1, -1), 20),
-            ("ROUNDEDCORNERS", [4]),
+            ("BACKGROUND",   (0, 0), (-1, -1), NAVY),
+            ("TOPPADDING",    (0, 0), (-1, -1), 18),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 16),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 22),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 22),
         ]))
         elems.append(banner_tbl)
         elems.append(Spacer(1, 0.2 * inch))
-
-        for line in md_text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("#### "):
-                elems.append(Paragraph(stripped[5:], sty["h3"]))
-            elif stripped.startswith("### "):
-                elems.append(Paragraph(stripped[4:], sty["h3"]))
-            elif stripped.startswith("## "):
-                elems.append(Paragraph(stripped[3:], sty["h2"]))
-            elif stripped.startswith("# "):
-                elems.append(Paragraph(stripped[2:], sty["h1"]))
-            elif stripped.startswith("---") or stripped.startswith("___"):
-                elems.append(HRFlowable(width="100%", thickness=0.5,
-                                        color=colors.HexColor("#c8d8ea"),
-                                        spaceAfter=8, spaceBefore=8))
-            elif stripped.startswith(("- ", "* ", "+ ")):
-                elems.append(Paragraph("• " + stripped[2:], sty["bullet"]))
-            elif stripped.startswith("`") and stripped.endswith("`"):
-                elems.append(Preformatted(stripped[1:-1], sty["code"]))
-            elif stripped == "":
-                elems.append(Spacer(1, 4))
-            else:
-                elems.append(Paragraph(stripped, sty["body"]))
+        elems.extend(parsed_elems)
 
         doc.build(elems)
         return True

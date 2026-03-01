@@ -27,20 +27,41 @@ Requirements:
     export GEMINI_API_KEY=AIza...
 """
 
+from __future__ import annotations
+
 import os
 import re
 import sys
 import argparse
+from typing import Any
 from pathlib import Path
 from datetime import datetime
 
-from google import genai
-from google.genai import types
+# ── Optional PDF-export deps (imported lazily) ────────────────────────────────
+# Primary:  pip install markdown weasyprint
+# Fallback: pip install reportlab markdown
+
+try:
+    from google import genai
+    from google.genai import types
+    _GENAI_IMPORT_ERROR = None
+except ImportError as exc:
+    genai = None
+    types = None
+    _GENAI_IMPORT_ERROR = exc
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 PDF_MIME = "application/pdf"
+
+# Fallback model chain — tried in order when a 429 rate-limit is hit.
+# The first entry is the preferred model; each subsequent entry is a step down.
+MODEL_FALLBACK_CHAIN = [
+    "gemini-2.0-flash",       # Gemini 2.0 Flash (primary fallback)
+    "gemini-2.5-flash",       # Gemini 2.5 Flash (secondary fallback)
+    "gemini-2.5-flash-lite-preview-06-17",  # Gemini 2.5 Flash Lite (last resort)
+]
 
 # Sentinels the PI uses to delimit the revised sections
 AIMS_START  = "<<<SPECIFIC_AIMS_START>>>"
@@ -446,54 +467,86 @@ def _banner(title: str, char: str = "─", width: int = 72) -> str:
     return f"\n{bar}\n  {title}\n{bar}\n"
 
 
-def _make_config(system: str) -> types.GenerateContentConfig:
+def _make_config(system: str) -> Any:
     return types.GenerateContentConfig(
         system_instruction=system,
         temperature=1.0,      # recommended for creative / analytical tasks
     )
 
 
-def _file_part(file_uri: str) -> types.Part:
+def _file_part(file_uri: str) -> Any:
     return types.Part.from_uri(file_uri=file_uri, mime_type=PDF_MIME)
 
 
-def _text_part(text: str) -> types.Part:
+def _text_part(text: str) -> Any:
     return types.Part.from_text(text=text)
 
 
 def stream_agent(
-    client: genai.Client,
+    client: Any,
     model: str,
     system: str,
     parts: list,
     label: str,
-) -> str:
+) -> tuple[str, str]:
     """
-    Stream a Gemini response to stdout and return the full text.
+    Stream a Gemini response to stdout and return (full_text, model_used).
 
-    parts: list of types.Part objects (file URI and/or text).
+    On a 429 rate-limit error, automatically retries each model in
+    MODEL_FALLBACK_CHAIN (skipping any already tried) before giving up.
     """
-    print(_banner(label))
-    collected: list[str] = []
+    # Build ordered list of models to attempt: requested model first,
+    # then any fallbacks not yet in the sequence.
+    models_to_try: list[str] = [model] + [
+        m for m in MODEL_FALLBACK_CHAIN if m != model
+    ]
 
-    for chunk in client.models.generate_content_stream(
-        model=model,
-        contents=[types.Content(parts=parts, role="user")],
-        config=_make_config(system),
-    ):
-        if chunk.text:
-            print(chunk.text, end="", flush=True)
-            collected.append(chunk.text)
+    last_exc: Exception | None = None
+    for attempt_model in models_to_try:
+        if attempt_model != model:
+            print(
+                f"\n[Rate limit] Switching from '{model}' "
+                f"→ '{attempt_model}'\n"
+            )
+        print(_banner(f"{label}  [model: {attempt_model}]"))
+        collected: list[str] = []
+        try:
+            for chunk in client.models.generate_content_stream(
+                model=attempt_model,
+                contents=[types.Content(parts=parts, role="user")],
+                config=_make_config(system),
+            ):
+                if chunk.text:
+                    print(chunk.text, end="", flush=True)
+                    collected.append(chunk.text)
+            print("\n")
+            return "".join(collected), attempt_model
+        except Exception as exc:  # noqa: BLE001
+            # 429 RESOURCE_EXHAUSTED → try next model in chain
+            is_429 = (
+                getattr(exc, "status_code", None) == 429
+                or "429" in str(exc)
+                or "RESOURCE_EXHAUSTED" in str(exc)
+            )
+            if is_429:
+                print(
+                    f"\n[Rate limit] '{attempt_model}' quota exhausted."
+                    + (" Trying next model…" if attempt_model != models_to_try[-1] else " No more fallbacks.")
+                )
+                last_exc = exc
+                continue
+            raise  # non-429 errors are re-raised immediately
 
-    print("\n")
-    return "".join(collected)
+    raise RuntimeError(
+        f"All models exhausted ({models_to_try}). Last error: {last_exc}"
+    ) from last_exc
 
 
 def _build_parts(
     prompt: str,
     file_uri: str | None = None,
     manuscript_text: str | None = None,
-) -> list[types.Part]:
+) -> list[Any]:
     """
     Build the Part list for a single agent call.
 
@@ -569,10 +622,25 @@ REVIEWERS = [
 
 # ── Main Review Loop ──────────────────────────────────────────────────────────
 
+def _validate_startup() -> None:
+    if _GENAI_IMPORT_ERROR is not None:
+        py = sys.executable
+        sys.exit(
+            "Error: missing dependency 'google-genai' for this Python interpreter.\n"
+            f"Interpreter: {py}\n"
+            "Install with:\n"
+            f"  {py} -m pip install -r requirements.txt"
+        )
+
+    if not os.environ.get("GEMINI_API_KEY"):
+        sys.exit(
+            "Error: GEMINI_API_KEY environment variable is not set.\n"
+            "Set it with:\n"
+            "  export GEMINI_API_KEY=your_api_key"
+        )
+
 def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        sys.exit("Error: GEMINI_API_KEY environment variable is not set.")
+    api_key = os.environ["GEMINI_API_KEY"]
 
     client = genai.Client(api_key=api_key)
     log: list[str] = []
@@ -623,7 +691,7 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
                     file_uri=current_file_uri,
                     manuscript_text=current_text,
                 )
-                out = stream_agent(client, model, sys_prompt, parts, name)
+                out, model = stream_agent(client, model, sys_prompt, parts, name)
                 critiques[name] = out
                 record(name, out)
 
@@ -648,7 +716,7 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
                 file_uri=current_file_uri,
                 manuscript_text=current_text,
             )
-            sro_out = stream_agent(
+            sro_out, model = stream_agent(
                 client, model, SRO_SYSTEM, sro_parts,
                 "Scientific Review Officer (SRO) — Summary Statement",
             )
@@ -717,7 +785,7 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
                 file_uri=current_file_uri,
                 manuscript_text=current_text,
             )
-            pi_out = stream_agent(
+            pi_out, model = stream_agent(
                 client, model, PI_SYSTEM, pi_parts,
                 "Principal Investigator — Revision",
             )
@@ -754,7 +822,376 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
 
         # ── Save output ───────────────────────────────────────────────────────
         Path(output_path).write_text("\n".join(log), encoding="utf-8")
-        print(f"Output saved → {output_path}\n")
+        print(f"Output saved → {output_path}")
+
+        # ── Convert to PDF ────────────────────────────────────────────────────
+        pdf_out = str(Path(output_path).with_suffix(".pdf"))
+        ok = _convert_to_pdf(output_path, pdf_out)
+        if ok:
+            print(f"PDF saved    → {pdf_out}\n")
+        else:
+            print(
+                "[PDF] Could not export PDF. "
+                "Install with: pip install reportlab\n"
+            )
+
+
+# ── PDF Export ───────────────────────────────────────────────────────────────
+
+_PDF_CSS = """
+@page {
+    size: letter;
+    margin: 0.9in 0.85in 0.85in 0.85in;
+    @top-left {
+        content: "NIH Grant Peer Review";
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-size: 8pt;
+        color: #9aa3af;
+        padding-top: 6pt;
+    }
+    @top-right {
+        content: string(docdate);
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-size: 8pt;
+        color: #9aa3af;
+        padding-top: 6pt;
+    }
+    @bottom-right {
+        content: counter(page) " / " counter(pages);
+        font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+        font-size: 8pt;
+        color: #9aa3af;
+        padding-bottom: 6pt;
+    }
+    border-top: 2.5pt solid #1a3a5c;
+}
+
+body {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 10.2pt;
+    line-height: 1.72;
+    color: #1e2126;
+    margin: 0;
+    padding: 0;
+}
+
+/* ── Cover / Title block ── */
+.doc-title {
+    string-set: docdate attr(data-date);
+    background: linear-gradient(135deg, #1a3a5c 0%, #2563a8 100%);
+    color: #ffffff;
+    padding: 28pt 32pt 24pt 32pt;
+    margin: -0pt -1pt 28pt -1pt;
+    border-radius: 0 0 6pt 6pt;
+    page-break-inside: avoid;
+}
+.doc-title h1 {
+    margin: 0 0 6pt 0;
+    font-size: 18pt;
+    font-weight: 700;
+    letter-spacing: -0.3pt;
+    color: #ffffff;
+    border: none;
+    padding: 0;
+}
+.doc-title .subtitle {
+    font-size: 9pt;
+    color: #a8c4e0;
+    margin: 0;
+    font-weight: 400;
+}
+
+/* ── Headings ── */
+h1 {
+    font-size: 16pt;
+    font-weight: 700;
+    color: #1a3a5c;
+    margin: 28pt 0 8pt 0;
+    padding-bottom: 5pt;
+    border-bottom: 2pt solid #2563a8;
+    page-break-after: avoid;
+}
+h2 {
+    font-size: 12.5pt;
+    font-weight: 700;
+    color: #2563a8;
+    margin: 20pt 0 5pt 0;
+    padding: 5pt 10pt;
+    background: #eef4fb;
+    border-left: 4pt solid #2563a8;
+    border-radius: 0 3pt 3pt 0;
+    page-break-after: avoid;
+}
+h3 {
+    font-size: 10.5pt;
+    font-weight: 700;
+    color: #1a3a5c;
+    margin: 14pt 0 4pt 0;
+    page-break-after: avoid;
+}
+h4 {
+    font-size: 10pt;
+    font-weight: 700;
+    color: #3a5a7c;
+    margin: 10pt 0 3pt 0;
+    page-break-after: avoid;
+}
+
+/* ── Body text ── */
+p {
+    margin: 0 0 8pt 0;
+    text-align: justify;
+    orphans: 3;
+    widows: 3;
+}
+
+/* ── Horizontal rules → section dividers ── */
+hr {
+    border: none;
+    border-top: 1pt solid #c8d8ea;
+    margin: 18pt 0;
+}
+
+/* ── Lists ── */
+ul, ol {
+    margin: 4pt 0 8pt 0;
+    padding-left: 18pt;
+}
+li {
+    margin-bottom: 3pt;
+}
+
+/* ── Score / callout blocks (blockquote) ── */
+blockquote {
+    margin: 10pt 0 10pt 0;
+    padding: 10pt 14pt;
+    background: #f0f6ff;
+    border-left: 5pt solid #2563a8;
+    border-radius: 0 4pt 4pt 0;
+    color: #1e2126;
+    font-size: 9.5pt;
+}
+blockquote p { margin: 0; text-align: left; }
+
+/* ── Inline code & code blocks ── */
+code {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 8.5pt;
+    background: #f4f6f8;
+    padding: 1pt 3pt;
+    border-radius: 2pt;
+    color: #c0392b;
+}
+pre {
+    background: #f4f6f8;
+    border: 0.5pt solid #dde3ea;
+    border-left: 4pt solid #7fb3d3;
+    padding: 8pt 10pt;
+    border-radius: 3pt;
+    font-size: 8pt;
+    overflow-x: auto;
+    page-break-inside: avoid;
+}
+pre code {
+    background: transparent;
+    padding: 0;
+    color: #1e2126;
+}
+
+/* ── Tables ── */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9pt;
+    margin: 10pt 0 14pt 0;
+    page-break-inside: avoid;
+}
+th {
+    background: #1a3a5c;
+    color: #ffffff;
+    padding: 6pt 8pt;
+    text-align: left;
+    font-weight: 600;
+}
+td {
+    padding: 5pt 8pt;
+    border-bottom: 0.5pt solid #dde3ea;
+    vertical-align: top;
+}
+tr:nth-child(even) td {
+    background: #f5f8fc;
+}
+
+/* ── Strong / emphasis ── */
+strong { color: #1a3a5c; font-weight: 700; }
+em { color: #2563a8; }
+"""
+
+
+def _convert_to_pdf(md_path: str, pdf_path: str) -> bool:
+    """Convert *md_path* to a stylish PDF at *pdf_path*.
+
+    Attempts weasyprint first (highest quality), then falls back to
+    reportlab.  Returns True on success, False if no PDF library is
+    available.
+    """
+    md_text = Path(md_path).read_text(encoding="utf-8")
+
+    # ── Attempt 1: markdown + weasyprint ─────────────────────────────────────
+    try:
+        import markdown as _md
+        from weasyprint import HTML, CSS  # type: ignore
+
+        html_body = _md.markdown(
+            md_text,
+            extensions=["tables", "fenced_code", "toc", "nl2br", "sane_lists"],
+        )
+
+        # Inject a styled title banner at the top
+        doc_date = datetime.now().strftime("%B %d, %Y")
+        title_block = (
+            f'<div class="doc-title" data-date="{doc_date}">'
+            f'<h1>NIH Grant Peer Review — Summary</h1>'
+            f'<p class="subtitle">Generated {doc_date} · Multi-Agent Review System</p>'
+            f"</div>\n"
+        )
+
+        full_html = (
+            "<!DOCTYPE html>\n<html lang=\"en\">\n"
+            "<head><meta charset=\"utf-8\"></head>\n"
+            f"<body>{title_block}{html_body}</body>\n</html>"
+        )
+
+        HTML(string=full_html).write_pdf(
+            pdf_path,
+            stylesheets=[CSS(string=_PDF_CSS)],
+        )
+        return True
+
+    except ImportError:
+        pass  # fall through to reportlab
+    except Exception as exc:  # noqa: BLE001
+        # Silently skip weasyprint if system GTK/Cairo libs are missing (common on macOS);
+        # only warn for unexpected errors.
+        err_str = str(exc)
+        if any(lib in err_str for lib in ("libgobject", "libcairo", "libpango", "cannot load library")):
+            pass  # GTK not installed — fall through quietly
+        else:
+            print(f"[PDF] weasyprint error: {exc}. Trying reportlab fallback…", file=sys.stderr)
+
+    # ── Attempt 2: markdown + reportlab ──────────────────────────────────────
+    try:
+        import textwrap
+        import markdown as _md
+        from reportlab.lib.pagesizes import LETTER  # type: ignore
+        from reportlab.lib.units import inch  # type: ignore
+        from reportlab.lib import colors  # type: ignore
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle  # type: ignore
+        from reportlab.platypus import (  # type: ignore
+            SimpleDocTemplate, Paragraph, Spacer, HRFlowable,
+            Table, TableStyle, Preformatted,
+        )
+        from reportlab.lib.enums import TA_JUSTIFY, TA_LEFT, TA_CENTER  # type: ignore
+
+        NAVY   = colors.HexColor("#1a3a5c")
+        BLUE   = colors.HexColor("#2563a8")
+        LTBLUE = colors.HexColor("#eef4fb")
+        GREY   = colors.HexColor("#9aa3af")
+        DARK   = colors.HexColor("#1e2126")
+
+        doc = SimpleDocTemplate(
+            pdf_path,
+            pagesize=LETTER,
+            leftMargin=0.85 * inch,
+            rightMargin=0.85 * inch,
+            topMargin=0.9 * inch,
+            bottomMargin=0.85 * inch,
+            title="NIH Grant Peer Review",
+        )
+
+        base = getSampleStyleSheet()
+        sty = {
+            "body":  ParagraphStyle("body",  parent=base["Normal"],
+                                    fontSize=10, leading=16, textColor=DARK,
+                                    alignment=TA_JUSTIFY, spaceAfter=6),
+            "h1":    ParagraphStyle("h1",    parent=base["Heading1"],
+                                    fontSize=16, textColor=NAVY, leading=22,
+                                    spaceBefore=20, spaceAfter=8,
+                                    borderPad=4, borderColor=BLUE,
+                                    borderWidth=0, underlineColor=BLUE),
+            "h2":    ParagraphStyle("h2",    parent=base["Heading2"],
+                                    fontSize=12, textColor=BLUE, leading=16,
+                                    spaceBefore=14, spaceAfter=6,
+                                    backColor=LTBLUE, leftIndent=-6,
+                                    borderPad=(4, 6, 4, 10)),
+            "h3":    ParagraphStyle("h3",    parent=base["Heading3"],
+                                    fontSize=10.5, textColor=NAVY, leading=15,
+                                    spaceBefore=10, spaceAfter=4, fontName="Helvetica-Bold"),
+            "code":  ParagraphStyle("code",  parent=base["Code"],
+                                    fontSize=8, leading=12, textColor=DARK,
+                                    backColor=colors.HexColor("#f4f6f8"),
+                                    leftIndent=10, rightIndent=10,
+                                    spaceBefore=4, spaceAfter=4),
+            "bullet":ParagraphStyle("bullet", parent=base["Normal"],
+                                    fontSize=10, leading=15, textColor=DARK,
+                                    leftIndent=18, spaceAfter=3,
+                                    bulletIndent=6),
+        }
+
+        elems = []
+
+        # Title banner (simulated with a table)
+        doc_date = datetime.now().strftime("%B %d, %Y")
+        banner_data = [[
+            Paragraph(
+                f'<font color="white" size="16"><b>NIH Grant Peer Review — Summary</b></font><br/>'
+                f'<font color="#a8c4e0" size="8">Generated {doc_date} · Multi-Agent Review System</font>',
+                ParagraphStyle("banner", parent=base["Normal"], leading=20),
+            )
+        ]]
+        banner_tbl = Table(banner_data, colWidths=[doc.width])
+        banner_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), NAVY),
+            ("TOPPADDING",    (0, 0), (-1, -1), 16),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+            ("LEFTPADDING",   (0, 0), (-1, -1), 20),
+            ("RIGHTPADDING",  (0, 0), (-1, -1), 20),
+            ("ROUNDEDCORNERS", [4]),
+        ]))
+        elems.append(banner_tbl)
+        elems.append(Spacer(1, 0.2 * inch))
+
+        for line in md_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#### "):
+                elems.append(Paragraph(stripped[5:], sty["h3"]))
+            elif stripped.startswith("### "):
+                elems.append(Paragraph(stripped[4:], sty["h3"]))
+            elif stripped.startswith("## "):
+                elems.append(Paragraph(stripped[3:], sty["h2"]))
+            elif stripped.startswith("# "):
+                elems.append(Paragraph(stripped[2:], sty["h1"]))
+            elif stripped.startswith("---") or stripped.startswith("___"):
+                elems.append(HRFlowable(width="100%", thickness=0.5,
+                                        color=colors.HexColor("#c8d8ea"),
+                                        spaceAfter=8, spaceBefore=8))
+            elif stripped.startswith(("- ", "* ", "+ ")):
+                elems.append(Paragraph("• " + stripped[2:], sty["bullet"]))
+            elif stripped.startswith("`") and stripped.endswith("`"):
+                elems.append(Preformatted(stripped[1:-1], sty["code"]))
+            elif stripped == "":
+                elems.append(Spacer(1, 4))
+            else:
+                elems.append(Paragraph(stripped, sty["body"]))
+
+        doc.build(elems)
+        return True
+
+    except ImportError:
+        return False
+    except Exception as exc:  # noqa: BLE001
+        print(f"[PDF] reportlab error: {exc}", file=sys.stderr)
+        return False
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
@@ -814,6 +1251,8 @@ def main() -> None:
         help="Output markdown file (default: <pdf_folder>/<name>_output.md)",
     )
     args = parser.parse_args()
+
+    _validate_startup()
 
     if not args.pdf:
         args.pdf = _pick_pdf()

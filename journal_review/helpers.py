@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """
-Helper functions for the Journal Peer Review system.
+Model-agnostic domain logic for the Journal Peer Review system.
 
-Re-uses all generic infrastructure from NIH_review_gemini.helpers and adds
-journal-specific parsing, prompts, and decision logic on top.
+Provides:
+  - Sentinel markers for structured agent output
+  - Prompt loader (reads from journal_review/prompts/ and instructions/)
+  - Combined reviewer & challenge system-prompt builders
+  - Parsers: combined critiques, decision, author revision
+  - Generic text utilities (re-exported from NIH_review_gemini.helpers)
+
+This module has NO dependency on any specific AI SDK.  Both gemini.py and
+claude.py import from here; edit the .txt files in prompts/ and instructions/
+to change agent behaviour for all backends simultaneously.
 """
 
 from __future__ import annotations
@@ -11,27 +19,19 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-# ── Re-export generic infrastructure from NIH_review_gemini ──────────────────
-# These functions are domain-agnostic: streaming, parts construction, PDF
-# export, terminal formatting, etc.
+# ── Re-export generic terminal / text / PDF utilities ────────────────────────
+# These live in NIH_review_gemini.helpers and are shared across all packages.
 
 from NIH_review_gemini.helpers import (        # noqa: F401  (re-exported)
     banner,
-    stream_agent,
-    build_parts,
-    make_config,
-    file_part,
-    text_part,
     extract_section,
     format_critiques,
     preprocess_markdown,
     convert_to_pdf,
-    validate_startup,
 )
 
-# ── Journal Sentinel Markers ──────────────────────────────────────────────────
+# ── Reviewer Output Sentinel Markers ─────────────────────────────────────────
 
-# Reviewer output sentinels
 _REVIEWER_SENTINELS: list[tuple[str, str, str]] = [
     ("Domain Expert",       "<<<DOMAIN_EXPERT_START>>>",       "<<<DOMAIN_EXPERT_END>>>"),
     ("Technical Reviewer",  "<<<TECHNICAL_REVIEWER_START>>>",  "<<<TECHNICAL_REVIEWER_END>>>"),
@@ -62,14 +62,14 @@ def load_prompt(
     rules: bool = True,
 ) -> str:
     """
-    Load a system prompt from journal_review_gemini/prompts/<name>.txt and
-    append requested instruction blocks from journal_review_gemini/instructions/.
+    Load a system prompt from journal_review/prompts/<name>.txt and append
+    requested instruction blocks from journal_review/instructions/.
 
     Args:
-        name:     Filename stem under journal_review_gemini/prompts/
+        name:     Filename stem under journal_review/prompts/
         scoring:  Append instructions/journal_scoring.txt
         criteria: Append instructions/journal_criteria.txt
-        rules:    Append instructions/global_rules.txt (default True)
+        rules:    Append instructions/global_rules.txt  (default True)
     """
     base = Path(__file__).parent
     text = (base / "prompts" / f"{name}.txt").read_text(encoding="utf-8").strip()
@@ -94,7 +94,7 @@ def load_prompt(
 def build_combined_reviewer_system() -> str:
     """
     Build a single system prompt that instructs the model to produce all
-    three reviewer critiques in one response.
+    three reviewer critiques in one response, separated by sentinels.
     """
     base = Path(__file__).parent
     template = (base / "prompts" / "combined_reviewers.txt").read_text(encoding="utf-8").strip()
@@ -113,7 +113,7 @@ def build_challenge_system() -> str:
 
 
 def parse_combined_critiques(raw: str) -> dict[str, str]:
-    """Parse the combined reviewer response into individual critiques."""
+    """Parse the combined reviewer response into individual reviewer critiques."""
     critiques: dict[str, str] = {}
     for name, start_tag, end_tag in _REVIEWER_SENTINELS:
         section = extract_section(raw, start_tag, end_tag)
@@ -156,7 +156,6 @@ def parse_decision(editor_text: str) -> str:
     )
     if m:
         raw = m.group(1).strip().title()
-        # Normalise
         if raw == "Accept":
             return "Accept"
         if "Minor" in raw:

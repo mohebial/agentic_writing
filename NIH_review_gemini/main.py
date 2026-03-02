@@ -34,6 +34,16 @@ import sys
 import argparse
 from pathlib import Path
 
+# ── Allow direct script execution: `python NIH_review_gemini/main.py` ────────
+# When run as a script (not via `python -m`), __package__ is None and relative
+# imports fail. Fix by inserting the repo root onto sys.path and setting the
+# package name before any relative imports are attempted.
+if __name__ == "__main__" and __package__ in (None, ""):
+    _pkg_root = Path(__file__).resolve().parent.parent
+    if str(_pkg_root) not in sys.path:
+        sys.path.insert(0, str(_pkg_root))
+    __package__ = "NIH_review_gemini"
+
 # ── Import helpers from submodule ────────────────────────────────────────────
 
 try:
@@ -96,10 +106,10 @@ INTRO_END   = "<<<INTRO_REVISED_APP_END>>>"
 # Reviewer prompts are combined into a single API call (saves RPD quota).
 # Edit the .txt files in prompts/ and instructions/ to change agent behaviour.
 
-COMBINED_REVIEWER_SYSTEM = build_combined_reviewer_system()
-CHALLENGE_SYSTEM         = build_challenge_system()
-SRO_SYSTEM               = load_prompt("sro",  scoring=True)
-PI_SYSTEM                = load_prompt("pi")
+COMBINED_REVIEWER_SYSTEM = build_combined_reviewer_system() if build_combined_reviewer_system else ""
+CHALLENGE_SYSTEM         = build_challenge_system()          if build_challenge_system          else ""
+SRO_SYSTEM               = load_prompt("sro", scoring=True)  if load_prompt                     else ""
+PI_SYSTEM                = load_prompt("pi")                 if load_prompt                     else ""
 
 # ── Main review orchestration ──────────────────────────────────────────────────
 

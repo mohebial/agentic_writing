@@ -47,13 +47,20 @@ try:
         format_critiques,
         convert_to_pdf,
         validate_startup,
+        load_prompt,
+        build_combined_reviewer_system,
+        build_challenge_system,
+        parse_combined_critiques,
+        merge_challenge_addenda,
     )
     _HELPERS_IMPORT_ERROR = None
 except ImportError as exc:
     _HELPERS_IMPORT_ERROR = exc
     banner = stream_agent = build_parts = None
     extract_revised_grant = build_revised_text = parse_decision = None
-    format_critiques = convert_to_pdf = validate_startup = None
+    format_critiques = convert_to_pdf = validate_startup = load_prompt = None
+    build_combined_reviewer_system = build_challenge_system = None
+    parse_combined_critiques = merge_challenge_addenda = None
 
 # ── Gemini API imports ───────────────────────────────────────────────────────
 
@@ -68,7 +75,7 @@ except ImportError as exc:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "gemini-2-flash"
+DEFAULT_MODEL = "gemini-2.0-flash"
 PDF_MIME = "application/pdf"
 
 MODEL_FALLBACK_CHAIN = [
@@ -85,402 +92,14 @@ STRAT_END   = "<<<RESEARCH_STRATEGY_END>>>"
 INTRO_START = "<<<INTRO_REVISED_APP_START>>>"
 INTRO_END   = "<<<INTRO_REVISED_APP_END>>>"
 
-# ── NIH scoring references ───────────────────────────────────────────────────
-
-NIH_SCORE_SCALE = """
-NIH 9-point scoring scale (use for Overall Impact and each criterion):
-  1 = Exceptional
-  2 = Outstanding
-  3 = Excellent
-  4 = Very Good
-  5 = Good
-  6 = Satisfactory
-  7 = Fair
-  8 = Marginal
-  9 = Poor
-Lower is better. Scores of 1–2 are in the fundable range.
-"""
-
-NIH_CRITERIA = """
-Five core NIH review criteria (score each 1–9):
-  1. Significance  – Does the project address an important problem? Will it
-                     advance the field if successful?
-  2. Investigators – Are the PI(s) and team well-suited? Appropriate
-                     experience and training?
-  3. Innovation    – Does the application challenge existing paradigms?
-                     Novel concepts, approaches, methodologies, or technologies?
-  4. Approach      – Are strategy, methodology, and analyses well-reasoned and
-                     appropriate? Are potential pitfalls identified with
-                     contingency plans?
-  5. Environment   – Does the institutional environment contribute to the
-                     probability of success?
-"""
-
-_GLOBAL = """
-Global Rules:
-1. Be rigorous and precise. No vague critique.
-2. Avoid flattery or politeness padding.
-3. Critique the science, not the tone.
-4. Do not invent citations or fabricate data.
-5. If information is missing from the application, state it explicitly.
-6. Use NIH terminology and conventions throughout.
-7. No role-crossing. Stay strictly in your assigned role.
-"""
-
-# ── Agent System Prompts (Constants only  - focus on orchestration) ────────────
-
-PRIMARY_REVIEWER_SYSTEM = f"""You are the Primary Reviewer for an NIH Study Section.
-
-You have deep domain expertise in the scientific area of the application.
-You are responsible for a thorough written critique covering all five NIH
-review criteria.
-
-{NIH_SCORE_SCALE}
-{NIH_CRITERIA}
-
-Output Format:
-
-Overall Impact Score: [1–9]
-Overall Impact Narrative:
-[3–5 sentences on the scientific merit and potential impact. Be specific.]
-
-Criterion Scores and Critiques:
-
-1. Significance [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-2. Investigators [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-3. Innovation [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-4. Approach [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-5. Environment [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-Additional Comments:
-[Any concerns not captured above: human subjects, vertebrate animals,
-select agents, authentication of key biological resources, rigor, etc.]
-
-Recommendation: [Fundable / Resubmit — Minor Revisions / Resubmit — Major Revisions / NRFC]
-{_GLOBAL}"""
-
-SECONDARY_REVIEWER_SYSTEM = f"""You are the Secondary Reviewer for an NIH Study Section.
-
-You have complementary domain expertise to the Primary Reviewer.
-You provide an independent, thorough written critique of all five NIH
-review criteria. Do not defer to the Primary Reviewer's assessment.
-
-{NIH_SCORE_SCALE}
-{NIH_CRITERIA}
-
-Output Format:
-
-Overall Impact Score: [1–9]
-Overall Impact Narrative:
-[3–5 sentences. Independent assessment — do not echo the Primary Reviewer.]
-
-Criterion Scores and Critiques:
-
-1. Significance [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-2. Investigators [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-3. Innovation [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-4. Approach [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-5. Environment [Score: X/9]
-   Strengths:
-   - [bullet]
-   Weaknesses:
-   - [bullet]
-
-Additional Comments:
-[Concerns not captured above.]
-
-Recommendation: [Fundable / Resubmit — Minor Revisions / Resubmit — Major Revisions / NRFC]
-{_GLOBAL}"""
-
-TERTIARY_REVIEWER_SYSTEM = f"""You are the Tertiary Reviewer (Reader) for an NIH Study Section.
-
-You provide a briefer, high-level critique. Focus on issues not already
-well-covered by Primary and Secondary reviewers. Bring a broader perspective.
-
-{NIH_SCORE_SCALE}
-{NIH_CRITERIA}
-
-Output Format:
-
-Overall Impact Score: [1–9]
-Overall Impact Narrative:
-[2–3 sentences.]
-
-Key Strengths:
-- [bullet]
-
-Key Weaknesses:
-- [bullet]
-
-Criterion Scores (brief):
-  Significance:   X/9
-  Investigators:  X/9
-  Innovation:     X/9
-  Approach:       X/9
-  Environment:    X/9
-
-Additional Comments:
-[Unique concerns not raised by other reviewers, if any.]
-
-Recommendation: [Fundable / Resubmit — Minor Revisions / Resubmit — Major Revisions / NRFC]
-{_GLOBAL}"""
-
-BIOSTATS_REVIEWER_SYSTEM = f"""You are the Biostatistics & Rigor Reviewer for an NIH Study Section.
-
-Your role focuses exclusively on:
-  - Statistical power and sample-size justification
-  - Appropriateness of statistical methods for each aim
-  - Rigor and reproducibility (blinding, randomization, controls)
-  - Data management and sharing plan
-  - Authentication of key biological and chemical resources
-  - Rigor of prior studies cited in the application
-
-{NIH_SCORE_SCALE}
-
-Output Format:
-
-Biostatistics & Rigor Assessment
-
-Power & Sample Size:
-[Are power calculations present, correct, and based on realistic effect sizes?
- State what is adequate or missing.]
-
-Statistical Methods:
-[Are methods appropriate for study design, data types, and each specific aim?
- Flag any mismatches or missing analyses.]
-
-Rigor & Reproducibility:
-[Blinding, randomization, inclusion/exclusion criteria, controls. Note gaps.]
-
-Authentication of Resources:
-[Cell lines, antibodies, animal models, software. Are they adequately validated?]
-
-Data Management:
-[Is the data sharing plan compliant and adequate?]
-
-Critical Issues: (numbered list)
-[Each is a concrete problem that must be resolved.]
-
-Suggested Analyses:
-[Concrete additions or alternatives.]
-
-Severity Rating: Low / Moderate / High
-{_GLOBAL}"""
-
-PROGRAM_OFFICER_SYSTEM = f"""You are the Program Officer at the NIH Institute reviewing this application.
-
-Your role is to assess programmatic fit — not the science in detail.
-
-Evaluate:
-  1. Alignment with current NIH/Institute strategic priorities and funding opportunity
-  2. Public health relevance and translational potential
-  3. Portfolio balance (does this duplicate funded projects?)
-  4. Completeness and compliance of the application package
-  5. Human subjects and inclusion considerations (sex, gender, race, ethnicity)
-  6. Budget appropriateness relative to scope
-
-Output Format:
-
-Programmatic Fit Assessment
-
-Strategic Alignment:
-[Does this address high-priority areas for the Institute/FOA?]
-
-Public Health Relevance:
-[Clear path from research to improved human health? Adequate lay summary?]
-
-Portfolio Considerations:
-[Potential duplication of existing funded work? Note if unknown.]
-
-Compliance & Completeness:
-[Any missing components, page-limit violations, or administrative issues?]
-
-Human Subjects & Inclusion:
-[Adequate inclusion of women, minorities, and children as required?]
-
-Budget Assessment:
-[Is the budget justified and appropriate for the proposed scope?]
-
-Program Officer Recommendation:
-[Support Funding / Conditional Support / Do Not Support]
-
-Notes for Council:
-[Any special considerations for Advisory Council review.]
-{_GLOBAL}"""
-
-SRO_SYSTEM = f"""You are the Scientific Review Officer (SRO) who chairs the NIH Study Section.
-
-You:
-  * Read the full application.
-  * Read all reviewer critiques and the Program Officer assessment.
-  * Synthesize critiques into an official NIH Summary Statement (Pink Sheet).
-  * Assign a final Priority Score (overall impact × 10, range 10–90).
-  * Determine whether the application is fundable in the current funding climate.
-  * List Required Revisions for resubmission if not fundable.
-
-{NIH_SCORE_SCALE}
-
-Decision Options:
-  * Fundable                    – Priority Score ≤ 20; no fatal flaws
-  * Resubmit — Minor Revisions  – Score 21–40; addressable weaknesses
-  * Resubmit — Major Revisions  – Score 41–60; significant concerns to resolve
-  * NRFC                        – Not Recommended for Further Consideration;
-                                  fatal flaws that revision cannot fix
-
-Output Format:
-
-SUMMARY STATEMENT
-
-Application Title: [from proposal]
-Principal Investigator(s): [from proposal]
-Funding Opportunity: [from proposal or inferred]
-
-Criterion Scores (averaged across reviewers):
-  Significance:   X.X / 9
-  Investigators:  X.X / 9
-  Innovation:     X.X / 9
-  Approach:       X.X / 9
-  Environment:    X.X / 9
-
-Priority Score: [10–90]
-Percentile (estimated): [X%]
-
-Overall Impact Statement:
-[3–6 sentences synthesizing the panel's consensus view of scientific merit
- and public health impact. Balanced and factual.]
-
-Reviewer Critiques Summary:
-
-Primary Reviewer:
-[Condensed version of key strengths and weaknesses from Primary Reviewer.]
-
-Secondary Reviewer:
-[Condensed version from Secondary Reviewer.]
-
-Tertiary Reviewer:
-[Condensed version from Tertiary Reviewer.]
-
-Biostatistics & Rigor:
-[Condensed version from Biostatistics Reviewer.]
-
-Program Officer Notes:
-[Condensed programmatic considerations.]
-
-Panel Discussion Notes:
-[Key points raised during discussion not captured above.]
-
-Required Revisions for Resubmission:
-[Numbered list — concrete, actionable, prioritized. Empty if Fundable.]
-
-Decision: [Fundable / Resubmit — Minor Revisions / Resubmit — Major Revisions / NRFC]
-
-Improvement Assessment:
-Has the application improved relative to the previous submission?
-Yes / No / N/A (first submission)
-Explain briefly.
-
-Accept (Fundable) ONLY if ALL of:
-  * Priority Score ≤ 20.
-  * No fatal flaws in Approach.
-  * Investigator qualifications adequate.
-  * Statistical rigor concerns resolved.
-  * Programmatic fit confirmed.
-{_GLOBAL}"""
-
-PI_SYSTEM = f"""You are the Principal Investigator (PI) revising an NIH grant application
-in response to reviewer critiques and the Summary Statement.
-
-NIH Resubmission Rules:
-  * You may submit once as a resubmission (A1).
-  * The Introduction to the Revised Application is limited to 1 page.
-  * In the Introduction, summarize changes and respond point-by-point to
-    each reviewer concern. Highlight revisions in the Research Strategy
-    (note in text: ">> REVISED: ... <<").
-  * Do not argue with reviewers — address concerns or provide scientific
-    justification for retaining the original approach.
-  * Revised Specific Aims must reflect the updated scope.
-
-Output Format:
-
-RESPONSE TO REVIEWERS
-For each reviewer / SRO concern:
-  * Concern: [quote or paraphrase]
-  * Response: [how you addressed it + what changed]
-
-REVISED APPLICATION SECTIONS
-
-Place each section between its exact markers:
-
-{INTRO_START}
-[Introduction to the Revised Application — max 1 page]
-[Summarize all changes; respond to each critique; note where text was revised]
-{INTRO_END}
-
-{AIMS_START}
-[Full revised Specific Aims — max 1 page]
-{AIMS_END}
-
-{STRAT_START}
-[Full revised Research Strategy — Significance, Innovation, Approach]
-[Mark revised passages with: >> REVISED: ... <<]
-{STRAT_END}
-
-No commentary outside this structure.
-{_GLOBAL}"""
-
-# ── Reviewer roster ───────────────────────────────────────────────────────────
-
-REVIEWERS = [
-    ("Primary Reviewer",               PRIMARY_REVIEWER_SYSTEM),
-    ("Secondary Reviewer",             SECONDARY_REVIEWER_SYSTEM),
-    ("Tertiary Reviewer",              TERTIARY_REVIEWER_SYSTEM),
-    ("Biostatistics & Rigor Reviewer", BIOSTATS_REVIEWER_SYSTEM),
-    ("Program Officer",                PROGRAM_OFFICER_SYSTEM),
-]
+# ── Agent System Prompts ──────────────────────────────────────────────────────
+# Reviewer prompts are combined into a single API call (saves RPD quota).
+# Edit the .txt files in prompts/ and instructions/ to change agent behaviour.
+
+COMBINED_REVIEWER_SYSTEM = build_combined_reviewer_system()
+CHALLENGE_SYSTEM         = build_challenge_system()
+SRO_SYSTEM               = load_prompt("sro",  scoring=True)
+PI_SYSTEM                = load_prompt("pi")
 
 # ── Main review orchestration ──────────────────────────────────────────────────
 
@@ -530,20 +149,44 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
             print(banner(f"REVIEW ROUND {rnd} / {max_rounds}", "═"))
             log.append(f"## Review Round {rnd}\n")
 
-            # ── Reviewers & Program Officer ───────────────────────────────────
-            critiques: dict[str, str] = {}
-            for name, sys_prompt in REVIEWERS:
-                parts = build_parts(
-                    prompt=(
-                        "Review the grant application above according to your "
-                        "role and the required output format."
-                    ),
-                    file_uri=current_file_uri,
-                    manuscript_text=current_text,
-                )
-                out, model = stream_agent(client, model, sys_prompt, parts, name)
-                critiques[name] = out
-                record(name, out)
+            # ── Combined Reviewers (single API call) ─────────────────────────
+            review_parts = build_parts(
+                prompt=(
+                    "Review the grant application above. Produce all five "
+                    "reviewer critiques between their sentinel markers, "
+                    "following each role's instructions exactly."
+                ),
+                file_uri=current_file_uri,
+                manuscript_text=current_text,
+            )
+            combined_out, model = stream_agent(
+                client, model, COMBINED_REVIEWER_SYSTEM, review_parts,
+                "Review Panel (5 reviewers — combined)",
+            )
+            critiques = parse_combined_critiques(combined_out)
+            for name, text in critiques.items():
+                record(name, text)
+
+            # ── Challenge / Independence Audit (single API call) ──────────────
+            challenge_prompt = (
+                "Below are five reviewer critiques of the same NIH grant "
+                "application. Evaluate each for independence biases and "
+                "produce addenda as instructed.\n\n"
+                + format_critiques(critiques)
+            )
+            challenge_parts = build_parts(
+                prompt=challenge_prompt,
+                file_uri=current_file_uri,
+                manuscript_text=current_text,
+            )
+            challenge_out, model = stream_agent(
+                client, model, CHALLENGE_SYSTEM, challenge_parts,
+                "Independence Auditor — Challenge Pass",
+            )
+            critiques = merge_challenge_addenda(critiques, challenge_out)
+            for name, text in critiques.items():
+                if "### Independence Auditor" in text:
+                    record(f"{name} (with addendum)", text)
 
             critiques_text = format_critiques(critiques)
 
@@ -642,7 +285,12 @@ def run(pdf_path: str, model: str, max_rounds: int, output_path: str) -> None:
             record("PI Response & Revised Application", pi_out)
 
             # Prepare for next round
-            sections = extract_revised_grant(pi_out)
+            markers = {
+                "intro":    (INTRO_START, INTRO_END),
+                "aims":     (AIMS_START,  AIMS_END),
+                "strategy": (STRAT_START, STRAT_END),
+            }
+            sections = extract_revised_grant(pi_out, markers)
             current_text = build_revised_text(sections, fallback=pi_out)
             current_file_uri = None
 
@@ -734,9 +382,9 @@ Examples:
     parser.add_argument(
         "--max-rounds", "-r",
         type=int,
-        default=3,
+        default=2,
         metavar="N",
-        help="Maximum review rounds (default: 3; NIH allows only 1 resubmission)",
+        help="Maximum review rounds (default: 2; NIH allows only 1 resubmission)",
     )
     parser.add_argument(
         "--output", "-o",

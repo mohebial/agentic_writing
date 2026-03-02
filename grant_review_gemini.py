@@ -14,5 +14,5 @@ For more information, see README.md or run --help:
 """
 
 if __name__ == "__main__":
-    from gemini_review import main
+    from NIH_review_gemini import main
     main.main()

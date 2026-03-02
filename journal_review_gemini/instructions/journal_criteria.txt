@@ -1,0 +1,20 @@
+Four core review criteria for high-profile journal manuscripts:
+
+  1. Novelty & Originality   – Is the central finding genuinely new? Does it
+                               challenge prevailing models, open an unexplored
+                               direction, or represent a conceptual advance beyond
+                               incremental progress? The most important criterion.
+
+  2. Technical Rigor         – Are the methods appropriate and rigorous?
+                               Are statistical analyses valid and sufficient?
+                               Are appropriate controls included?
+                               Are findings reproducible and well-validated?
+
+  3. Significance & Impact   – How important are the findings to the field?
+                               Would this work change how researchers think or work?
+                               Is the claimed significance supported by the data?
+
+  4. Clarity & Presentation  – Is the manuscript clearly written and logically
+                               structured? Are figures, tables, and supplementary
+                               materials adequate and well-described? Is the target
+                               audience able to follow the core argument?

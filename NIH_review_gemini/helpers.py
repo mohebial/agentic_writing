@@ -146,11 +146,22 @@ def stream_agent(
                     time.sleep(wait)
                     continue
 
-                if is_503 or is_429:
-                    reason = "quota exhausted" if is_429 else "still unavailable after retries"
+                if is_429:
+                    print(
+                        f"\n[429] Daily request quota exhausted for '{attempt_model}'.\n"
+                        "All free-tier models share the same RPD quota — "
+                        "no point trying fallbacks.\n"
+                        "Wait until tomorrow or upgrade your API plan."
+                    )
+                    raise RuntimeError(
+                        f"Daily request quota exhausted (429 RESOURCE_EXHAUSTED). "
+                        f"Model: {attempt_model}. Last error: {exc}"
+                    ) from exc
+
+                if is_503:
                     more = attempt_model != models_to_try[-1]
                     print(
-                        f"\n[Fallback] '{attempt_model}' {reason}."
+                        f"\n[Fallback] '{attempt_model}' still unavailable after retries."
                         + (" Trying next model…" if more else " No more fallbacks.")
                     )
                     last_exc = exc
@@ -806,3 +817,125 @@ def validate_startup() -> None:
             "Error: GEMINI_API_KEY environment variable is not set.\n"
             "Set it with: export GEMINI_API_KEY=your_api_key"
         )
+
+
+# ── Combined Reviewer Utilities ──────────────────────────────────────────────
+
+# Sentinel markers for the combined reviewer output
+_REVIEWER_SENTINELS: list[tuple[str, str, str]] = [
+    ("Primary Reviewer",               "<<<PRIMARY_REVIEWER_START>>>",       "<<<PRIMARY_REVIEWER_END>>>"),
+    ("Secondary Reviewer",             "<<<SECONDARY_REVIEWER_START>>>",     "<<<SECONDARY_REVIEWER_END>>>"),
+    ("Tertiary Reviewer",              "<<<TERTIARY_REVIEWER_START>>>",      "<<<TERTIARY_REVIEWER_END>>>"),
+    ("Biostatistics & Rigor Reviewer", "<<<BIOSTATISTICS_REVIEWER_START>>>", "<<<BIOSTATISTICS_REVIEWER_END>>>"),
+    ("Program Officer",                "<<<PROGRAM_OFFICER_START>>>",        "<<<PROGRAM_OFFICER_END>>>"),
+]
+
+_CHALLENGE_SENTINELS: list[tuple[str, str, str]] = [
+    ("Primary Reviewer",               "<<<PRIMARY_REVIEWER_ADDENDUM_START>>>",       "<<<PRIMARY_REVIEWER_ADDENDUM_END>>>"),
+    ("Secondary Reviewer",             "<<<SECONDARY_REVIEWER_ADDENDUM_START>>>",     "<<<SECONDARY_REVIEWER_ADDENDUM_END>>>"),
+    ("Tertiary Reviewer",              "<<<TERTIARY_REVIEWER_ADDENDUM_START>>>",      "<<<TERTIARY_REVIEWER_ADDENDUM_END>>>"),
+    ("Biostatistics & Rigor Reviewer", "<<<BIOSTATISTICS_REVIEWER_ADDENDUM_START>>>", "<<<BIOSTATISTICS_REVIEWER_ADDENDUM_END>>>"),
+    ("Program Officer",                "<<<PROGRAM_OFFICER_ADDENDUM_START>>>",        "<<<PROGRAM_OFFICER_ADDENDUM_END>>>"),
+]
+
+
+def build_combined_reviewer_system() -> str:
+    """
+    Build a single system prompt that instructs the model to produce
+    all five reviewer critiques in one response.
+
+    Loads the combined_reviewers.txt template and injects each reviewer's
+    individual prompt (with scoring / criteria / rules appended).
+    """
+    base = Path(__file__).parent
+    template = (base / "prompts" / "combined_reviewers.txt").read_text(encoding="utf-8").strip()
+
+    # load_prompt is defined below — use a forward reference via local import
+    reviewer_prompts = {
+        "primary_reviewer":   load_prompt("primary_reviewer",   scoring=True, criteria=True),
+        "secondary_reviewer": load_prompt("secondary_reviewer", scoring=True, criteria=True),
+        "tertiary_reviewer":  load_prompt("tertiary_reviewer",  scoring=True, criteria=True),
+        "biostatistics":      load_prompt("biostatistics",      scoring=True),
+        "program_officer":    load_prompt("program_officer"),
+    }
+    return template.format(**reviewer_prompts)
+
+
+def build_challenge_system() -> str:
+    """Load the challenge / independence-auditor system prompt."""
+    base = Path(__file__).parent
+    return (base / "prompts" / "challenge_pass.txt").read_text(encoding="utf-8").strip()
+
+
+def parse_combined_critiques(raw: str) -> dict[str, str]:
+    """
+    Parse the combined reviewer response into individual critiques.
+
+    Returns a dict mapping reviewer name → critique text, in the same
+    shape that ``format_critiques()`` expects.
+    """
+    critiques: dict[str, str] = {}
+    for name, start_tag, end_tag in _REVIEWER_SENTINELS:
+        section = extract_section(raw, start_tag, end_tag)
+        if section:
+            critiques[name] = section
+        else:
+            # Graceful degradation — include whatever is available
+            critiques[name] = f"[Section missing — sentinel markers not found for {name}]"
+    return critiques
+
+
+def merge_challenge_addenda(
+    critiques: dict[str, str],
+    challenge_out: str,
+) -> dict[str, str]:
+    """
+    Parse the challenge-pass response and merge addenda into the
+    corresponding reviewer critiques.
+
+    If an addendum says "No addendum needed." (or similar), the
+    original critique is left untouched.
+    """
+    for name, start_tag, end_tag in _CHALLENGE_SENTINELS:
+        addendum = extract_section(challenge_out, start_tag, end_tag)
+        if not addendum:
+            continue
+        # Skip trivial addenda
+        if addendum.lower().strip().startswith("no addendum needed"):
+            continue
+        if name in critiques:
+            critiques[name] += (
+                "\n\n### Independence Auditor — Addendum\n\n" + addendum
+            )
+    return critiques
+
+
+# ── Prompt Loader ──────────────────────────────────────────────────────────────
+
+def load_prompt(
+    name: str,
+    *,
+    scoring: bool = False,
+    criteria: bool = False,
+    rules: bool = True,
+) -> str:
+    """
+    Load a system prompt from prompts/<name>.txt and append any requested
+    shared instruction blocks from the instructions/ directory.
+
+    Args:
+        name:     Filename stem under gemini_review/prompts/ (e.g. 'primary_reviewer')
+        scoring:  Append instructions/nih_scoring_scale.txt
+        criteria: Append instructions/nih_criteria.txt
+        rules:    Append instructions/global_rules.txt (default True)
+    """
+    base = Path(__file__).parent
+    text = (base / "prompts" / f"{name}.txt").read_text(encoding="utf-8").strip()
+    extras: list[str] = []
+    if scoring:
+        extras.append((base / "instructions" / "nih_scoring_scale.txt").read_text(encoding="utf-8").strip())
+    if criteria:
+        extras.append((base / "instructions" / "nih_criteria.txt").read_text(encoding="utf-8").strip())
+    if rules:
+        extras.append((base / "instructions" / "global_rules.txt").read_text(encoding="utf-8").strip())
+    return "\n\n".join([text] + extras)

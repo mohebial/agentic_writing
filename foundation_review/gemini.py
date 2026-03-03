@@ -77,13 +77,13 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3-flash-preview"
 PDF_MIME      = "application/pdf"
 
 MODEL_FALLBACK_CHAIN = [
-    "gemini-2.0-flash",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite-preview-06-17",
+    "gemini-2.0-flash",
 ]
 
 _503_RETRY_DELAYS = [15, 30, 60]

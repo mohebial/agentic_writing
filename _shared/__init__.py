@@ -1,43 +1,23 @@
 #!/usr/bin/env python3
 """
-Helper functions for the NIH Grant Peer Review system.
+Shared, domain-agnostic utilities used by all review packages.
 
-Functions for:
-  - Terminal I/O and formatting
-  - Gemini API interaction (config, parts, streaming)
-  - Text processing and extraction
-  - Markdown preprocessing and PDF conversion
+Provides:
+  - Terminal formatting  (banner)
+  - Text processing      (extract_section, format_critiques)
+  - Markdown processing  (preprocess_markdown)
+  - PDF export           (convert_to_pdf)
+
+This module has NO dependency on any AI SDK or review-domain logic.
 """
+
+from __future__ import annotations
 
 import re
 import sys
-import time
 from pathlib import Path
 from datetime import datetime
-from typing import Any
 
-# Optional imports for Gemini
-try:
-    from google import genai
-    from google.genai import types
-except ImportError:
-    genai = None
-    types = None
-
-# ── Configuration ────────────────────────────────────────────────────────────
-
-PDF_MIME = "application/pdf"
-DEFAULT_MODEL = "gemini-2.0-flash"
-
-# Fallback model chain — tried in order when a 429 rate-limit is hit
-MODEL_FALLBACK_CHAIN = [
-    "gemini-2.0-flash",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite-preview-06-17",
-]
-
-# Retry intervals (seconds) for transient 503 errors
-_503_RETRY_DELAYS = [15, 30, 60]
 
 # ── Terminal Utilities ───────────────────────────────────────────────────────
 
@@ -45,135 +25,6 @@ def banner(title: str, char: str = "─", width: int = 72) -> str:
     """Create a styled terminal banner."""
     bar = char * width
     return f"\n{bar}\n  {title}\n{bar}\n"
-
-
-# ── Gemini API Utilities ─────────────────────────────────────────────────────
-
-def make_config(system: str) -> Any:
-    """Create Gemini generation config with system instruction."""
-    if types is None:
-        raise ImportError("google-genai not installed")
-    return types.GenerateContentConfig(
-        system_instruction=system,
-        temperature=1.0,
-    )
-
-
-def file_part(file_uri: str) -> Any:
-    """Create a Gemini file part."""
-    if types is None:
-        raise ImportError("google-genai not installed")
-    return types.Part.from_uri(file_uri=file_uri, mime_type=PDF_MIME)
-
-
-def text_part(text: str) -> Any:
-    """Create a Gemini text part."""
-    if types is None:
-        raise ImportError("google-genai not installed")
-    return types.Part.from_text(text=text)
-
-
-def build_parts(
-    prompt: str,
-    file_uri: str | None = None,
-    manuscript_text: str | None = None,
-) -> list[Any]:
-    """
-    Build the Part list for a Gemini request.
-
-    Round 1 (file_uri set):  PDF part + prompt text part
-    Round 2+ (text set):     combined text part
-    """
-    if file_uri:
-        return [file_part(file_uri), text_part(prompt)]
-    else:
-        combined = f"## Grant Application (Revised)\n\n{manuscript_text}\n\n{prompt}"
-        return [text_part(combined)]
-
-
-def stream_agent(
-    client: Any,
-    model: str,
-    system: str,
-    parts: list,
-    label: str,
-) -> tuple[str, str]:
-    """
-    Stream a Gemini response to stdout and return (full_text, model_used).
-
-    Error handling:
-    - 503 UNAVAILABLE (high demand): retry the same model up to 3 times
-    - 429 RESOURCE_EXHAUSTED (quota): switch to next model immediately
-    """
-    models_to_try: list[str] = [model] + [
-        m for m in MODEL_FALLBACK_CHAIN if m != model
-    ]
-
-    last_exc: Exception | None = None
-    for attempt_model in models_to_try:
-        if attempt_model != model:
-            print(f"\n[Fallback] Switching → '{attempt_model}'\n")
-
-        # Per-model retry loop (503 only)
-        for retry_num in range(1 + len(_503_RETRY_DELAYS)):
-            print(banner(f"{label}  [model: {attempt_model}]"))
-            collected: list[str] = []
-            try:
-                for chunk in client.models.generate_content_stream(
-                    model=attempt_model,
-                    contents=[types.Content(parts=parts, role="user")],
-                    config=make_config(system),
-                ):
-                    if chunk.text:
-                        print(chunk.text, end="", flush=True)
-                        collected.append(chunk.text)
-                print("\n")
-                return "".join(collected), attempt_model
-
-            except Exception as exc:  # noqa: BLE001
-                exc_str = str(exc)
-                status = getattr(exc, "status_code", None)
-
-                is_503 = (status == 503 or "503" in exc_str or "UNAVAILABLE" in exc_str)
-                is_429 = (status == 429 or "429" in exc_str or "RESOURCE_EXHAUSTED" in exc_str)
-
-                if is_503 and retry_num < len(_503_RETRY_DELAYS):
-                    wait = _503_RETRY_DELAYS[retry_num]
-                    print(
-                        f"\n[503] '{attempt_model}' is under high demand. "
-                        f"Retrying in {wait} s… (attempt {retry_num + 1}/{len(_503_RETRY_DELAYS)})"
-                    )
-                    time.sleep(wait)
-                    continue
-
-                if is_429:
-                    print(
-                        f"\n[429] Daily request quota exhausted for '{attempt_model}'.\n"
-                        "All free-tier models share the same RPD quota — "
-                        "no point trying fallbacks.\n"
-                        "Wait until tomorrow or upgrade your API plan."
-                    )
-                    raise RuntimeError(
-                        f"Daily request quota exhausted (429 RESOURCE_EXHAUSTED). "
-                        f"Model: {attempt_model}. Last error: {exc}"
-                    ) from exc
-
-                if is_503:
-                    more = attempt_model != models_to_try[-1]
-                    print(
-                        f"\n[Fallback] '{attempt_model}' still unavailable after retries."
-                        + (" Trying next model…" if more else " No more fallbacks.")
-                    )
-                    last_exc = exc
-                    break  # exit retry loop
-
-                raise  # non-retryable error
-
-            break
-
-    raise RuntimeError(
-        f"All models exhausted ({models_to_try}). Last error: {last_exc}"
-    ) from last_exc
 
 
 # ── Text Processing ─────────────────────────────────────────────────────────
@@ -187,61 +38,6 @@ def extract_section(text: str, start: str, end: str) -> str | None:
     return None
 
 
-def extract_revised_grant(pi_text: str, markers: dict) -> dict[str, str | None]:
-    """Extract revised application sections from PI response.
-    
-    Args:
-        pi_text: PI's response text
-        markers: Dict with keys 'intro', 'aims', 'strategy' containing (start, end) tuples
-    """
-    return {
-        "intro": extract_section(
-            pi_text,
-            markers["intro"][0],
-            markers["intro"][1],
-        ),
-        "aims": extract_section(
-            pi_text,
-            markers["aims"][0],
-            markers["aims"][1],
-        ),
-        "strategy": extract_section(
-            pi_text,
-            markers["strategy"][0],
-            markers["strategy"][1],
-        ),
-    }
-
-
-def build_revised_text(sections: dict[str, str | None], fallback: str) -> str:
-    """Build revised application text from extracted sections."""
-    parts = []
-    if sections.get("intro"):
-        parts.append("## Introduction to the Revised Application\n\n" + sections["intro"])
-    if sections.get("aims"):
-        parts.append("## Specific Aims\n\n" + sections["aims"])
-    if sections.get("strategy"):
-        parts.append("## Research Strategy\n\n" + sections["strategy"])
-    return "\n\n---\n\n".join(parts) if parts else fallback
-
-
-def parse_decision(sro_text: str) -> str:
-    """Extract SRO decision from response text."""
-    m = re.search(
-        r"Decision\s*[:\-]?\s*(Fundable|Resubmit\s*[—\-]+\s*Minor Revisions"
-        r"|Resubmit\s*[—\-]+\s*Major Revisions|NRFC)",
-        sro_text,
-        re.IGNORECASE,
-    )
-    if m:
-        raw = m.group(1).strip()
-        raw = re.sub(r"\s*[—\-]+\s*", " — ", raw)
-        return raw if "nrfc" in raw.lower() else raw.title()
-    if re.search(r"^\s*Fundable\s*$", sro_text, re.MULTILINE | re.IGNORECASE):
-        return "Fundable"
-    return "Unknown"
-
-
 def format_critiques(critiques: dict[str, str]) -> str:
     """Format reviewer critiques with separators."""
     sep = "─" * 60
@@ -250,7 +46,7 @@ def format_critiques(critiques: dict[str, str]) -> str:
     )
 
 
-# ── Markdown Processing ──────────────────────────────────────────────────────
+# ── Markdown Processing ─────────────────────────────────────────────────────
 
 def preprocess_markdown(md_text: str) -> str:
     """Clean markdown text for reliable conversion to PDF.
@@ -292,7 +88,7 @@ _PDF_CSS = """
     size: letter;
     margin: 0.9in 0.85in 0.85in 0.85in;
     @top-left {
-        content: "NIH Grant Peer Review";
+        content: "Grant Peer Review";
         font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
         font-size: 8pt;
         color: #9aa3af;
@@ -419,7 +215,7 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
         doc_date = datetime.now().strftime("%B %d, %Y")
         title_block = (
             f'<div class="doc-title" data-date="{doc_date}">'
-            f"<h1>NIH Grant Peer Review — Summary</h1>"
+            f"<h1>Peer Review -- Summary</h1>"
             f'<p class="subtitle">Generated {doc_date} · Multi-Agent Review System</p>'
             f"</div>\n"
         )
@@ -503,7 +299,7 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                     return
                 self.set_font("Helvetica", "", 7)
                 self.set_text_color(*GRAY)
-                self.cell(0, 4, "NIH Grant Peer Review", align="L")
+                self.cell(0, 4, "Peer Review", align="L")
                 self.cell(0, 4, self._doc_date, align="R", new_x="LMARGIN", new_y="NEXT")
                 self.set_draw_color(*NAVY)
                 self.set_line_width(0.6)
@@ -530,7 +326,7 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self.set_xy(bx + 6, by + 5)
                 self.set_font("Helvetica", "B", 16)
                 self.set_text_color(*WHITE)
-                self.cell(0, 8, _safe("NIH Grant Peer Review -- Summary"))
+                self.cell(0, 8, _safe("Peer Review -- Summary"))
                 self.set_xy(bx + 6, by + 15)
                 self.set_font("Helvetica", "", 8)
                 self.set_text_color(168, 196, 224)
@@ -796,146 +592,4 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
     except Exception as exc:  # noqa: BLE001
         print(f"[PDF] fpdf2 error: {exc}", file=sys.stderr)
 
-    # ── Attempt 3: reportlab (legacy) ────────────────────────────────────────
-    # Reportlab fallback omitted for brevity; see main script if needed
-
     return False
-
-
-def validate_startup() -> None:
-    """Validate API key and dependencies on startup."""
-    import os
-    
-    if genai is None:
-        sys.exit(
-            "Error: missing dependency 'google-genai'.\n"
-            f"Install with: pip install -r requirements.txt"
-        )
-
-    if not os.environ.get("GEMINI_API_KEY"):
-        sys.exit(
-            "Error: GEMINI_API_KEY environment variable is not set.\n"
-            "Set it with: export GEMINI_API_KEY=your_api_key"
-        )
-
-
-# ── Combined Reviewer Utilities ──────────────────────────────────────────────
-
-# Sentinel markers for the combined reviewer output
-_REVIEWER_SENTINELS: list[tuple[str, str, str]] = [
-    ("Primary Reviewer",               "<<<PRIMARY_REVIEWER_START>>>",       "<<<PRIMARY_REVIEWER_END>>>"),
-    ("Secondary Reviewer",             "<<<SECONDARY_REVIEWER_START>>>",     "<<<SECONDARY_REVIEWER_END>>>"),
-    ("Tertiary Reviewer",              "<<<TERTIARY_REVIEWER_START>>>",      "<<<TERTIARY_REVIEWER_END>>>"),
-    ("Biostatistics & Rigor Reviewer", "<<<BIOSTATISTICS_REVIEWER_START>>>", "<<<BIOSTATISTICS_REVIEWER_END>>>"),
-    ("Program Officer",                "<<<PROGRAM_OFFICER_START>>>",        "<<<PROGRAM_OFFICER_END>>>"),
-]
-
-_CHALLENGE_SENTINELS: list[tuple[str, str, str]] = [
-    ("Primary Reviewer",               "<<<PRIMARY_REVIEWER_ADDENDUM_START>>>",       "<<<PRIMARY_REVIEWER_ADDENDUM_END>>>"),
-    ("Secondary Reviewer",             "<<<SECONDARY_REVIEWER_ADDENDUM_START>>>",     "<<<SECONDARY_REVIEWER_ADDENDUM_END>>>"),
-    ("Tertiary Reviewer",              "<<<TERTIARY_REVIEWER_ADDENDUM_START>>>",      "<<<TERTIARY_REVIEWER_ADDENDUM_END>>>"),
-    ("Biostatistics & Rigor Reviewer", "<<<BIOSTATISTICS_REVIEWER_ADDENDUM_START>>>", "<<<BIOSTATISTICS_REVIEWER_ADDENDUM_END>>>"),
-    ("Program Officer",                "<<<PROGRAM_OFFICER_ADDENDUM_START>>>",        "<<<PROGRAM_OFFICER_ADDENDUM_END>>>"),
-]
-
-
-def build_combined_reviewer_system() -> str:
-    """
-    Build a single system prompt that instructs the model to produce
-    all five reviewer critiques in one response.
-
-    Loads the combined_reviewers.txt template and injects each reviewer's
-    individual prompt (with scoring / criteria / rules appended).
-    """
-    base = Path(__file__).parent
-    template = (base / "prompts" / "combined_reviewers.txt").read_text(encoding="utf-8").strip()
-
-    # load_prompt is defined below — use a forward reference via local import
-    reviewer_prompts = {
-        "primary_reviewer":   load_prompt("primary_reviewer",   scoring=True, criteria=True),
-        "secondary_reviewer": load_prompt("secondary_reviewer", scoring=True, criteria=True),
-        "tertiary_reviewer":  load_prompt("tertiary_reviewer",  scoring=True, criteria=True),
-        "biostatistics":      load_prompt("biostatistics",      scoring=True),
-        "program_officer":    load_prompt("program_officer"),
-    }
-    return template.format(**reviewer_prompts)
-
-
-def build_challenge_system() -> str:
-    """Load the challenge / independence-auditor system prompt."""
-    base = Path(__file__).parent
-    return (base / "prompts" / "challenge_pass.txt").read_text(encoding="utf-8").strip()
-
-
-def parse_combined_critiques(raw: str) -> dict[str, str]:
-    """
-    Parse the combined reviewer response into individual critiques.
-
-    Returns a dict mapping reviewer name → critique text, in the same
-    shape that ``format_critiques()`` expects.
-    """
-    critiques: dict[str, str] = {}
-    for name, start_tag, end_tag in _REVIEWER_SENTINELS:
-        section = extract_section(raw, start_tag, end_tag)
-        if section:
-            critiques[name] = section
-        else:
-            # Graceful degradation — include whatever is available
-            critiques[name] = f"[Section missing — sentinel markers not found for {name}]"
-    return critiques
-
-
-def merge_challenge_addenda(
-    critiques: dict[str, str],
-    challenge_out: str,
-) -> dict[str, str]:
-    """
-    Parse the challenge-pass response and merge addenda into the
-    corresponding reviewer critiques.
-
-    If an addendum says "No addendum needed." (or similar), the
-    original critique is left untouched.
-    """
-    for name, start_tag, end_tag in _CHALLENGE_SENTINELS:
-        addendum = extract_section(challenge_out, start_tag, end_tag)
-        if not addendum:
-            continue
-        # Skip trivial addenda
-        if addendum.lower().strip().startswith("no addendum needed"):
-            continue
-        if name in critiques:
-            critiques[name] += (
-                "\n\n### Independence Auditor — Addendum\n\n" + addendum
-            )
-    return critiques
-
-
-# ── Prompt Loader ──────────────────────────────────────────────────────────────
-
-def load_prompt(
-    name: str,
-    *,
-    scoring: bool = False,
-    criteria: bool = False,
-    rules: bool = True,
-) -> str:
-    """
-    Load a system prompt from prompts/<name>.txt and append any requested
-    shared instruction blocks from the instructions/ directory.
-
-    Args:
-        name:     Filename stem under gemini_review/prompts/ (e.g. 'primary_reviewer')
-        scoring:  Append instructions/nih_scoring_scale.txt
-        criteria: Append instructions/nih_criteria.txt
-        rules:    Append instructions/global_rules.txt (default True)
-    """
-    base = Path(__file__).parent
-    text = (base / "prompts" / f"{name}.txt").read_text(encoding="utf-8").strip()
-    extras: list[str] = []
-    if scoring:
-        extras.append((base / "instructions" / "nih_scoring_scale.txt").read_text(encoding="utf-8").strip())
-    if criteria:
-        extras.append((base / "instructions" / "nih_criteria.txt").read_text(encoding="utf-8").strip())
-    if rules:
-        extras.append((base / "instructions" / "global_rules.txt").read_text(encoding="utf-8").strip())
-    return "\n\n".join([text] + extras)

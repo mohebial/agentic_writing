@@ -7,7 +7,7 @@ Provides:
   - Prompt loader (reads from journal_review/prompts/ and instructions/)
   - Combined reviewer & challenge system-prompt builders
   - Parsers: combined critiques, decision, author revision
-  - Generic text utilities (re-exported from NIH_review_gemini.helpers)
+  - Generic text utilities (re-exported from _shared)
 
 This module has NO dependency on any specific AI SDK.  Both gemini.py and
 claude.py import from here; edit the .txt files in prompts/ and instructions/
@@ -20,9 +20,9 @@ import re
 from pathlib import Path
 
 # ── Re-export generic terminal / text / PDF utilities ────────────────────────
-# These live in NIH_review_gemini.helpers and are shared across all packages.
+# These live in _shared and are shared across all review packages.
 
-from NIH_review_gemini.helpers import (        # noqa: F401  (re-exported)
+from _shared import (                          # noqa: F401  (re-exported)
     banner,
     extract_section,
     format_critiques,

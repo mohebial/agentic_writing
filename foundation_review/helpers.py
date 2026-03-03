@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-Helper functions for the Foundation Grant Review system.
+Model-agnostic domain logic for the Foundation Grant Review system.
 
-Re-uses all generic infrastructure from gemini_review.helpers and adds
-foundation-specific parsing, prompts, and decision logic on top.
+Provides:
+  - Sentinel markers for structured agent output
+  - Prompt loader (reads from foundation_review/prompts/ and instructions/)
+  - Combined reviewer & challenge system-prompt builders
+  - Parsers: combined critiques, decision, applicant revision
+  - Generic text utilities (re-exported from _shared)
+
+This module has NO dependency on any specific AI SDK.  Both gemini.py and
+claude.py import from here; edit the .txt files in prompts/ and instructions/
+to change agent behaviour for all backends simultaneously.
 """
 
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
-# ── Re-export generic infrastructure from gemini_review ─────────────────────
-# These functions are domain-agnostic: streaming, parts construction, PDF
-# export, terminal formatting, etc.
+# ── Re-export generic terminal / text / PDF utilities ────────────────────────
+# These live in _shared and are shared across all review packages.
 
-from NIH_review_gemini.helpers import (        # noqa: F401  (re-exported)
+from _shared import (          # noqa: F401  (re-exported)
     banner,
-    stream_agent,
-    build_parts,
-    make_config,
-    file_part,
-    text_part,
     extract_section,
     format_critiques,
     preprocess_markdown,
     convert_to_pdf,
-    validate_startup,
 )
 
-# ── Foundation Sentinel Markers ──────────────────────────────────────────────
+# ── Reviewer Output Sentinel Markers ─────────────────────────────────────────
 
-# Reviewer output sentinels
 _REVIEWER_SENTINELS: list[tuple[str, str, str]] = [
     ("Scientific Reviewer", "<<<SCIENTIFIC_REVIEWER_START>>>", "<<<SCIENTIFIC_REVIEWER_END>>>"),
     ("Innovation Reviewer", "<<<INNOVATION_REVIEWER_START>>>", "<<<INNOVATION_REVIEWER_END>>>"),
@@ -46,11 +45,11 @@ _CHALLENGE_SENTINELS: list[tuple[str, str, str]] = [
     ("Program Advisor",     "<<<PROGRAM_ADVISOR_ADDENDUM_START>>>",     "<<<PROGRAM_ADVISOR_ADDENDUM_END>>>"),
 ]
 
-# PI / applicant response sentinels
-COVER_LETTER_START    = "<<<COVER_LETTER_START>>>"
-COVER_LETTER_END      = "<<<COVER_LETTER_END>>>"
-NARRATIVE_START       = "<<<REVISED_NARRATIVE_START>>>"
-NARRATIVE_END         = "<<<REVISED_NARRATIVE_END>>>"
+# Applicant / Project Director revision sentinels
+COVER_LETTER_START = "<<<COVER_LETTER_START>>>"
+COVER_LETTER_END   = "<<<COVER_LETTER_END>>>"
+NARRATIVE_START    = "<<<REVISED_NARRATIVE_START>>>"
+NARRATIVE_END      = "<<<REVISED_NARRATIVE_END>>>"
 
 
 # ── Prompt Loader ─────────────────────────────────────────────────────────────
@@ -63,24 +62,30 @@ def load_prompt(
     rules: bool = True,
 ) -> str:
     """
-    Load a system prompt from foundation_review/prompts/<name>.txt and
-    append requested instruction blocks from foundation_review/instructions/.
+    Load a system prompt from foundation_review/prompts/<name>.txt and append
+    requested instruction blocks from foundation_review/instructions/.
 
     Args:
         name:     Filename stem under foundation_review/prompts/
         scoring:  Append instructions/foundation_scoring.txt
         criteria: Append instructions/foundation_criteria.txt
-        rules:    Append instructions/global_rules.txt (default True)
+        rules:    Append instructions/global_rules.txt  (default True)
     """
     base = Path(__file__).parent
     text = (base / "prompts" / f"{name}.txt").read_text(encoding="utf-8").strip()
     extras: list[str] = []
     if scoring:
-        extras.append((base / "instructions" / "foundation_scoring.txt").read_text(encoding="utf-8").strip())
+        extras.append(
+            (base / "instructions" / "foundation_scoring.txt").read_text(encoding="utf-8").strip()
+        )
     if criteria:
-        extras.append((base / "instructions" / "foundation_criteria.txt").read_text(encoding="utf-8").strip())
+        extras.append(
+            (base / "instructions" / "foundation_criteria.txt").read_text(encoding="utf-8").strip()
+        )
     if rules:
-        extras.append((base / "instructions" / "global_rules.txt").read_text(encoding="utf-8").strip())
+        extras.append(
+            (base / "instructions" / "global_rules.txt").read_text(encoding="utf-8").strip()
+        )
     return "\n\n".join([text] + extras)
 
 
@@ -88,8 +93,8 @@ def load_prompt(
 
 def build_combined_reviewer_system() -> str:
     """
-    Build a single system prompt that instructs the model to produce
-    all three reviewer critiques in one response.
+    Build a single system prompt that instructs the model to produce all
+    three reviewer critiques in one response, separated by sentinels.
     """
     base = Path(__file__).parent
     template = (base / "prompts" / "combined_reviewers.txt").read_text(encoding="utf-8").strip()
@@ -108,11 +113,14 @@ def build_challenge_system() -> str:
 
 
 def parse_combined_critiques(raw: str) -> dict[str, str]:
-    """Parse the combined reviewer response into individual critiques."""
+    """Parse the combined reviewer response into individual reviewer critiques."""
     critiques: dict[str, str] = {}
     for name, start_tag, end_tag in _REVIEWER_SENTINELS:
         section = extract_section(raw, start_tag, end_tag)
-        critiques[name] = section if section else f"[Section missing — sentinel not found for {name}]"
+        critiques[name] = (
+            section if section
+            else f"[Section missing — sentinel not found for {name}]"
+        )
     return critiques
 
 
@@ -135,7 +143,11 @@ def merge_challenge_addenda(
 # ── Decision Parser ───────────────────────────────────────────────────────────
 
 def parse_decision(chair_text: str) -> str:
-    """Extract the Panel Chair's final decision from the recommendation letter."""
+    """
+    Extract the Panel Chair's final decision from the recommendation letter.
+
+    Returns one of: 'Fund' | 'Fund with Conditions' | 'Decline' | 'Unknown'
+    """
     m = re.search(
         r"Final Decision\s*[:\-]?\s*(Fund with Conditions|Fund|Decline)",
         chair_text,
@@ -143,7 +155,6 @@ def parse_decision(chair_text: str) -> str:
     )
     if m:
         raw = m.group(1).strip()
-        # Normalise casing
         if raw.lower() == "fund":
             return "Fund"
         if "condition" in raw.lower():
@@ -166,10 +177,10 @@ def parse_decision(chair_text: str) -> str:
 # ── Applicant Revision Extraction ─────────────────────────────────────────────
 
 def extract_applicant_revision(text: str) -> dict[str, str | None]:
-    """Extract cover letter and revised narrative from the applicant response."""
+    """Extract cover letter and revised narrative from the applicant's response."""
     return {
         "cover_letter": extract_section(text, COVER_LETTER_START, COVER_LETTER_END),
-        "narrative":    extract_section(text, NARRATIVE_START, NARRATIVE_END),
+        "narrative":    extract_section(text, NARRATIVE_START,    NARRATIVE_END),
     }
 
 

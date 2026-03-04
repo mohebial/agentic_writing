@@ -67,6 +67,24 @@ def preprocess_markdown(md_text: str) -> str:
             line = indent + "- " + stripped[2:]
             stripped = line.lstrip()
 
+        # Strip structural section-delimiter markers (e.g. <<<COVER_LETTER_START>>>)
+        # that the AI writes as metadata but should not appear in the rendered PDF.
+        if re.match(r"^<<<[A-Z_]+>>>$", stripped):
+            line = ""
+            stripped = ""
+
+        # Strip trailing " <<" or "<<" close-marker from custom >> ... << blockquotes.
+        # Applies to ALL lines (not just ">"-prefixed) because multi-line blockquotes
+        # have the closing << on a continuation line that no longer starts with ">".
+        if stripped.endswith("<<"):
+            stripped = stripped[:-2].rstrip()
+            line = indent + stripped
+
+        # Strip lone *italic* markers — fpdf2 markdown=True only supports **bold**
+        # and --underline--; single asterisks are not parsed and render literally.
+        stripped = re.sub(r"(?<!\*)\*(?!\*)([^*]+?)\*(?!\*)", r"\1", stripped)
+        line = indent + stripped
+
         is_bullet = bool(re.match(r"^[-+]\s+", stripped)) or bool(
             re.match(r"^\d+[.)]\s+", stripped)
         )
@@ -284,7 +302,7 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
         BQBLUE = (240, 246, 255)
 
         _UNICODE_MAP = {
-            "\u2014": "--",
+            "\u2014": " - ",
             "\u2013": "-",
             "\u2018": "'",
             "\u2019": "'",
@@ -387,18 +405,63 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
 
             def render_h2(self, text: str) -> None:
                 self.ln(5)
-                bw = self.w - self.l_margin - self.r_margin
+                # Ensure there is room; if too close to bottom, start new page
+                if self.get_y() + 10 > self.h - self.b_margin:
+                    self.add_page()
                 bx = self.l_margin
                 by = self.get_y()
+                bw = self.w - self.l_margin - self.r_margin
+                # Render text with light-blue fill so multi_cell handles wrapping
                 self.set_fill_color(*LTBLUE)
-                self.rect(bx, by, bw, 8, style="F")
-                self.set_fill_color(*BLUE)
-                self.rect(bx, by, 1.2, 8, style="F")
-                self.set_xy(bx + 4, by + 1)
                 self.set_font("Helvetica", "B", 11)
                 self.set_text_color(*BLUE)
-                self.cell(0, 6, self._strip_md(text))
-                self.set_y(by + 10)
+                self.multi_cell(0, 7, self._strip_md(text), fill=True)
+                end_y = self.get_y()
+                self.set_y(end_y + 2)
+
+            def render_blockquote(self, text: str) -> None:
+                saved_lm = self.l_margin
+                bx = saved_lm + 2
+                inner_x = bx + 5
+                self.ln(2)
+                start_page = self.page
+                by = self.get_y()
+                self.set_left_margin(inner_x)
+                self.set_x(inner_x)
+                self.set_fill_color(*BQBLUE)
+                # Use regular base font so markdown=True can parse **bold** and *italic*
+                # correctly.  Setting italic as the base font prevents the bold parser
+                # from working - the fill colour + accent bar already mark it as a quote.
+                self.set_font("Helvetica", "", 9)
+                self.set_text_color(*DARK)
+                self.multi_cell(0, 5, _safe(text), fill=True, markdown=True)
+                end_page = self.page
+                end_y = self.get_y()
+
+                # Draw accent bar on every page the blockquote spans
+                self.set_fill_color(*BLUE)
+                for pg in range(start_page, end_page + 1):
+                    self.page = pg
+                    if pg == start_page and pg == end_page:
+                        bar_top = by
+                        bar_bot = end_y
+                    elif pg == start_page:
+                        bar_top = by
+                        bar_bot = self.h - self.b_margin
+                    elif pg == end_page:
+                        bar_top = self.t_margin
+                        bar_bot = end_y
+                    else:
+                        bar_top = self.t_margin
+                        bar_bot = self.h - self.b_margin
+                    if bar_bot > bar_top:
+                        self.rect(bx, bar_top, 1.5, bar_bot - bar_top, style="F")
+
+                # Restore to the final page
+                self.page = end_page
+                self.set_y(end_y)
+                self.set_left_margin(saved_lm)
+                self.ln(3)
 
             def render_h3(self, text: str) -> None:
                 self.ln(5)
@@ -455,25 +518,6 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self._mc(0, 5, text.strip())
                 self.ln(1.5)
                 self.set_left_margin(saved_lm)
-
-            def render_blockquote(self, text: str) -> None:
-                safe_text = _safe(text)  # sanitise once; used for width calc AND rendering
-                bx = self.l_margin + 2
-                self.set_x(bx)
-                bw = self.w - self.l_margin - self.r_margin - 4
-                self.set_font("Helvetica", "I", 9)
-                lines_n = max(1, self.get_string_width(safe_text) / bw + 1)
-                bh = lines_n * 5 + 6
-                by = self.get_y()
-                self.set_fill_color(*BQBLUE)
-                self.rect(bx, by, bw, bh, style="F")
-                self.set_fill_color(*BLUE)
-                self.rect(bx, by, 1.5, bh, style="F")
-                self.set_xy(bx + 5, by + 3)
-                self.set_text_color(*DARK)
-                self.set_font("Helvetica", "I", 9)
-                self.multi_cell(bw - 8, 5, safe_text)
-                self.set_y(max(self.get_y(), by + bh) + 3)
 
             def render_hr(self) -> None:
                 self.ln(4)

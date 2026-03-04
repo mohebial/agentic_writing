@@ -11,6 +11,9 @@ import os
 import tempfile
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 
 from review_engine.config import ensure_types_loaded, get_config, REVIEW_TYPES
@@ -157,7 +160,7 @@ if not uploaded_file and not st.session_state.result_md:
     )
 
 elif start_clicked:
-    # ── Run the review ───────────────────────────────────────────────────
+    # ── Prepare the review — save params and rerun so the UI disables the button
     st.session_state.review_running = True
     st.session_state.output_buffer = ""
     st.session_state.result_md = None
@@ -166,59 +169,92 @@ elif start_clicked:
     # Write uploaded PDF to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         tmp.write(uploaded_file.getvalue())
-        tmp_pdf_path = tmp.name
+        st.session_state._tmp_pdf_path = tmp.name
 
-    # Output path
     pdf_stem = Path(uploaded_file.name).stem
-    tmp_output = tempfile.mktemp(suffix=".md", prefix=f"{pdf_stem}_review_")
-
-    # Streaming output area
-    output_placeholder = st.empty()
-    status_placeholder = st.empty()
-
-    def on_chunk(text: str) -> None:
-        st.session_state.output_buffer += text
-        output_placeholder.code(st.session_state.output_buffer[-5000:], language=None)
-
-    def on_status(msg: str) -> None:
-        status_placeholder.info(msg)
-
-    try:
-        from review_engine.engine import run_review
-
-        result_md = run_review(
-            config=config,
-            backend=backend,
-            pdf_path=tmp_pdf_path,
-            model=model,
-            max_rounds=max_rounds,
-            output_path=tmp_output,
-            on_chunk=on_chunk,
-            on_status=on_status,
-        )
-
-        st.session_state.result_md = result_md
-
-        # Read generated PDF if it exists
-        pdf_output = Path(tmp_output).with_suffix(".pdf")
-        if pdf_output.exists():
-            st.session_state.result_pdf_bytes = pdf_output.read_bytes()
-
-        st.session_state.review_running = False
-        status_placeholder.success("Review complete!")
-
-    except Exception as e:
-        st.session_state.review_running = False
-        st.error(f"Review failed: {e}")
-
-    finally:
-        # Cleanup temp PDF
-        try:
-            os.unlink(tmp_pdf_path)
-        except OSError:
-            pass
+    st.session_state._tmp_output = tempfile.mktemp(suffix=".md", prefix=f"{pdf_stem}_review_")
+    st.session_state._run_config = config
+    st.session_state._run_backend = backend
+    st.session_state._run_model = model
+    st.session_state._run_max_rounds = max_rounds
 
     st.rerun()
+
+elif st.session_state.review_running:
+    # ── Execute the review (button is already disabled on this rerun) ────
+    tmp_pdf_path = st.session_state.get("_tmp_pdf_path")
+    tmp_output = st.session_state.get("_tmp_output")
+    run_config = st.session_state.get("_run_config", config)
+    run_backend = st.session_state.get("_run_backend", backend)
+    run_model = st.session_state.get("_run_model", model)
+    run_max_rounds = st.session_state.get("_run_max_rounds", max_rounds)
+
+    if tmp_pdf_path:
+        # Streaming output area
+        progress_bar = st.progress(0, text="Starting review...")
+        status_placeholder = st.empty()
+        output_placeholder = st.empty()
+
+        steps_seen: set[str] = set()
+        step_labels = [
+            "Review Panel", "Independence Auditor", "Panel Chair",
+            "Project Director", "SRO", "Editor", "Recommendation",
+            "Revision", "Uploading", "Loading",
+        ]
+
+        def on_chunk(text: str) -> None:
+            st.session_state.output_buffer += text
+            output_placeholder.code(st.session_state.output_buffer[-5000:], language=None)
+
+        def on_status(msg: str) -> None:
+            # Update progress bar based on steps detected
+            for i, label in enumerate(step_labels):
+                if label.lower() in msg.lower():
+                    steps_seen.add(label)
+            pct = min(0.95, len(steps_seen) / max(len(step_labels), 1))
+            progress_bar.progress(pct, text=msg)
+            status_placeholder.info(msg)
+
+        try:
+            from review_engine.engine import run_review
+
+            result_md = run_review(
+                config=run_config,
+                backend=run_backend,
+                pdf_path=tmp_pdf_path,
+                model=run_model,
+                max_rounds=run_max_rounds,
+                output_path=tmp_output,
+                on_chunk=on_chunk,
+                on_status=on_status,
+            )
+
+            st.session_state.result_md = result_md
+
+            # Read generated PDF if it exists
+            pdf_output = Path(tmp_output).with_suffix(".pdf")
+            if pdf_output.exists():
+                st.session_state.result_pdf_bytes = pdf_output.read_bytes()
+
+            progress_bar.progress(1.0, text="Review complete!")
+            status_placeholder.success("Review complete!")
+
+        except Exception as e:
+            st.error(f"Review failed: {e}")
+
+        finally:
+            st.session_state.review_running = False
+            # Cleanup temp PDF
+            try:
+                os.unlink(tmp_pdf_path)
+            except OSError:
+                pass
+
+        st.rerun()
+    else:
+        st.session_state.review_running = False
+        st.error("No PDF found to review. Please try again.")
+        st.rerun()
 
 elif st.session_state.result_md:
     # ── Show results ─────────────────────────────────────────────────────
@@ -256,7 +292,3 @@ elif st.session_state.result_md:
         st.session_state.result_pdf_bytes = None
         st.session_state.output_buffer = ""
         st.rerun()
-
-elif st.session_state.review_running:
-    st.info("Review in progress... Please wait.")
-    st.code(st.session_state.output_buffer[-5000:] if st.session_state.output_buffer else "Starting...", language=None)

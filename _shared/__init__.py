@@ -204,33 +204,59 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
 
     # ── Attempt 1: weasyprint ────────────────────────────────────────────────
     try:
+        import os as _os
+        import logging as _logging
         import markdown as _md
-        from weasyprint import HTML, CSS  # type: ignore
 
-        html_body = _md.markdown(
-            md_clean,
-            extensions=["tables", "fenced_code", "toc", "sane_lists"],
-        )
+        def _silence_fds():
+            """Redirect both fd 1 (stdout) and fd 2 (stderr) to /dev/null."""
+            dn = _os.open(_os.devnull, _os.O_WRONLY)
+            s1, s2 = _os.dup(1), _os.dup(2)
+            _os.dup2(dn, 1)
+            _os.dup2(dn, 2)
+            _os.close(dn)
+            return s1, s2
 
-        doc_date = datetime.now().strftime("%B %d, %Y")
-        title_block = (
-            f'<div class="doc-title" data-date="{doc_date}">'
-            f"<h1>Peer Review -- Summary</h1>"
-            f'<p class="subtitle">Generated {doc_date} · Multi-Agent Review System</p>'
-            f"</div>\n"
-        )
+        def _restore_fds(s1: int, s2: int) -> None:
+            _os.dup2(s1, 1); _os.close(s1)
+            _os.dup2(s2, 2); _os.close(s2)
 
-        full_html = (
-            '<!DOCTYPE html>\n<html lang="en">\n'
-            '<head><meta charset="utf-8"></head>\n'
-            f"<body>{title_block}{html_body}</body>\n</html>"
-        )
+        # WeasyPrint emits "could not import external libraries" via its logger
+        # AND via native fd-2 writes.  Silence both for the whole WeasyPrint scope.
+        _wp_logger = _logging.getLogger("weasyprint")
+        _prev_level = _wp_logger.level
+        _wp_logger.setLevel(_logging.CRITICAL)
+        _s1, _s2 = _silence_fds()
+        try:
+            from weasyprint import HTML, CSS  # type: ignore
 
-        HTML(string=full_html).write_pdf(
-            pdf_path,
-            stylesheets=[CSS(string=_PDF_CSS)],
-        )
-        return True
+            html_body = _md.markdown(
+                md_clean,
+                extensions=["tables", "fenced_code", "toc", "sane_lists"],
+            )
+
+            doc_date = datetime.now().strftime("%B %d, %Y")
+            title_block = (
+                f'<div class="doc-title" data-date="{doc_date}">'
+                f"<h1>Peer Review -- Summary</h1>"
+                f'<p class="subtitle">Generated {doc_date} · Multi-Agent Review System</p>'
+                f"</div>\n"
+            )
+
+            full_html = (
+                '<!DOCTYPE html>\n<html lang="en">\n'
+                '<head><meta charset="utf-8"></head>\n'
+                f"<body>{title_block}{html_body}</body>\n</html>"
+            )
+
+            HTML(string=full_html).write_pdf(
+                pdf_path,
+                stylesheets=[CSS(string=_PDF_CSS)],
+            )
+            return True
+        finally:
+            _restore_fds(_s1, _s2)
+            _wp_logger.setLevel(_prev_level)
 
     except ImportError:
         pass
@@ -336,11 +362,49 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 )
                 self.set_y(by + bh + 8)
 
+            # ── inline markdown renderer ──────────────────────────────────
+            def _render_rich(
+                self,
+                text: str,
+                size: float = 9.5,
+                line_h: float = 5.5,
+            ) -> None:
+                """Write text honouring **bold** and *italic* inline markers.
+
+                Uses write() so line-wrapping respects the current l_margin.
+                Caller is responsible for positioning (set_x / set_left_margin)
+                before calling, and for any trailing ln() afterwards.
+                """
+                import re as _ire
+                parts = _ire.split(r'(\*\*[^*]+?\*\*|\*[^*]+?\*)', text)
+                self.set_text_color(*DARK)
+                for part in parts:
+                    if not part:
+                        continue
+                    if part.startswith('**') and part.endswith('**') and len(part) > 4:
+                        self.set_font('Helvetica', 'B', size)
+                        self.write(line_h, _safe(part[2:-2]))
+                    elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+                        self.set_font('Helvetica', 'I', size)
+                        self.write(line_h, _safe(part[1:-1]))
+                    else:
+                        self.set_font('Helvetica', '', size)
+                        self.write(line_h, _safe(part))
+                # Reset to plain after inline run
+                self.set_font('Helvetica', '', size)
+
+            def _strip_md(self, text: str) -> str:
+                """Remove **bold** / *italic* markers, return plain safe string."""
+                import re as _ire
+                t = _ire.sub(r'\*\*([^*]+?)\*\*', r'\1', text)
+                t = _ire.sub(r'\*([^*]+?)\*', r'\1', t)
+                return _safe(t)
+
             def render_h1(self, text: str) -> None:
                 self.ln(6)
                 self.set_font("Helvetica", "B", 14)
                 self.set_text_color(*NAVY)
-                self.multi_cell(0, 7, _safe(text))
+                self.multi_cell(0, 7, self._strip_md(text))
                 y = self.get_y() + 1
                 self.set_draw_color(*BLUE)
                 self.set_line_width(0.55)
@@ -359,28 +423,37 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self.set_xy(bx + 4, by + 1)
                 self.set_font("Helvetica", "B", 11)
                 self.set_text_color(*BLUE)
-                self.cell(0, 6, _safe(text))
+                self.cell(0, 6, self._strip_md(text))
                 self.set_y(by + 10)
 
             def render_h3(self, text: str) -> None:
                 self.ln(5)
                 self.set_font("Helvetica", "B", 10)
                 self.set_text_color(*NAVY)
-                self.multi_cell(0, 5.5, _safe(text))
+                self.multi_cell(0, 5.5, self._strip_md(text))
                 self.ln(2)
 
             def render_h4(self, text: str) -> None:
                 self.ln(4)
                 self.set_font("Helvetica", "B", 9.5)
                 self.set_text_color(58, 90, 124)
-                self.multi_cell(0, 5.5, _safe(text))
+                self.multi_cell(0, 5.5, self._strip_md(text))
                 self.ln(2)
 
             def render_paragraph(self, text: str) -> None:
-                self.set_font("Helvetica", "", 9.5)
-                self.set_text_color(*DARK)
-                self.multi_cell(0, 5.5, _safe(text))
+                """Render body paragraph with inline **bold** / *italic* support."""
+                import re as _ire
+                # A line that is ENTIRELY **bold** reads like a sub-heading –
+                # promote it to h4 for better visual hierarchy.
+                if _ire.fullmatch(r'\*\*[^*]+\*\*', text.strip()):
+                    self.render_h4(text.strip()[2:-2])
+                    return
+                # Otherwise render inline rich text.
+                saved_lm = self.l_margin
+                self.set_left_margin(self.l_margin)  # no-op; ensures write() wraps correctly
+                self._render_rich(text, size=9.5, line_h=5.5)
                 self.ln(2.5)
+                self.set_left_margin(saved_lm)
 
             def render_bullet(self, text: str, indent: int = 0) -> None:
                 x_base = self.l_margin + 4 + (indent * 5)
@@ -390,12 +463,13 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self.set_fill_color(*BLUE)
                 self.ellipse(bx, by, 1.6, 1.6, style="F")
                 text_x = x_base + 5
+                # Temporarily shift left margin so write() wraps at the indent
+                saved_lm = self.l_margin
+                self.set_left_margin(text_x)
                 self.set_x(text_x)
-                self.set_font("Helvetica", "", 9.5)
-                self.set_text_color(*DARK)
-                w = self.w - self.r_margin - text_x
-                self.multi_cell(w, 5, _safe(text.strip()))
+                self._render_rich(text.strip(), size=9.5, line_h=5)
                 self.ln(1.5)
+                self.set_left_margin(saved_lm)
 
             def render_numbered(self, num: str, text: str) -> None:
                 x_base = self.l_margin + 3
@@ -404,18 +478,19 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self.set_text_color(*BLUE)
                 self.cell(7, 5, _safe(f"{num}"))
                 text_x = self.get_x()
-                self.set_text_color(*DARK)
-                self.set_font("Helvetica", "", 9.5)
-                w = self.w - self.r_margin - text_x
-                self.multi_cell(w, 5, _safe(text.strip()))
+                saved_lm = self.l_margin
+                self.set_left_margin(text_x)
+                self._render_rich(text.strip(), size=9.5, line_h=5)
                 self.ln(1.5)
+                self.set_left_margin(saved_lm)
 
             def render_blockquote(self, text: str) -> None:
+                safe_text = _safe(text)  # sanitise once; used for width calc AND rendering
                 bx = self.l_margin + 2
                 self.set_x(bx)
                 bw = self.w - self.l_margin - self.r_margin - 4
                 self.set_font("Helvetica", "I", 9)
-                lines_n = max(1, self.get_string_width(text) / bw + 1)
+                lines_n = max(1, self.get_string_width(safe_text) / bw + 1)
                 bh = lines_n * 5 + 6
                 by = self.get_y()
                 self.set_fill_color(*BQBLUE)
@@ -425,7 +500,7 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self.set_xy(bx + 5, by + 3)
                 self.set_text_color(*DARK)
                 self.set_font("Helvetica", "I", 9)
-                self.multi_cell(bw - 8, 5, _safe(text))
+                self.multi_cell(bw - 8, 5, safe_text)
                 self.set_y(max(self.get_y(), by + bh) + 3)
 
             def render_hr(self) -> None:

@@ -76,13 +76,30 @@ except ImportError:
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = "claude-sonnet-4-20250514"
-PDF_MIME      = "application/pdf"
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"  # or keep the snapshot below
+
+PDF_MIME = "application/pdf"
 
 MODEL_FALLBACK_CHAIN = [
-    "claude-sonnet-4-20250514",
-    "claude-3-5-sonnet-20241022",
-    "claude-3-5-haiku-20241022",
+    # Claude 4.6 generation (Feb 2026) — latest
+    "claude-opus-4-6",               # Most capable, 1M context, agent teams
+    "claude-sonnet-4-6",             # Frontier intelligence at scale, preferred for coding
+
+    # Claude 4.5 generation (Sept–Nov 2025)
+    "claude-opus-4-5",               # Premium intelligence (67% cheaper than earlier Opus)
+    "claude-sonnet-4-5-20250929",    # Best for agents, coding, computer use
+    "claude-haiku-4-5-20251001",     # Fast and cheap
+
+    # Claude 4 generation (May 2025)
+    "claude-opus-4-20250514",        # Agentic search, complex coding
+    "claude-sonnet-4-20250514",      # Your current default
+
+    # Claude 3.7 (Feb 2025) — legacy but still active
+    "claude-sonnet-3-7-20250219",    # Extended thinking / hybrid reasoning
+
+    # Claude 3.5 (Oct 2024) — legacy
+    "claude-3-5-sonnet-20241022",    # Your current fallback #2
+    "claude-3-5-haiku-20241022",     # Your current fallback #3 — RETIRED Feb 2026 ⚠️
 ]
 
 MAX_TOKENS         = 16384

@@ -362,43 +362,17 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 )
                 self.set_y(by + bh + 8)
 
-            # ── inline markdown renderer ──────────────────────────────────
-            def _render_rich(
-                self,
-                text: str,
-                size: float = 9.5,
-                line_h: float = 5.5,
-            ) -> None:
-                """Write text honouring **bold** and *italic* inline markers.
-
-                Uses write() so line-wrapping respects the current l_margin.
-                Caller is responsible for positioning (set_x / set_left_margin)
-                before calling, and for any trailing ln() afterwards.
-                """
-                import re as _ire
-                parts = _ire.split(r'(\*\*[^*]+?\*\*|\*[^*]+?\*)', text)
-                self.set_text_color(*DARK)
-                for part in parts:
-                    if not part:
-                        continue
-                    if part.startswith('**') and part.endswith('**') and len(part) > 4:
-                        self.set_font('Helvetica', 'B', size)
-                        self.write(line_h, _safe(part[2:-2]))
-                    elif part.startswith('*') and part.endswith('*') and len(part) > 2:
-                        self.set_font('Helvetica', 'I', size)
-                        self.write(line_h, _safe(part[1:-1]))
-                    else:
-                        self.set_font('Helvetica', '', size)
-                        self.write(line_h, _safe(part))
-                # Reset to plain after inline run
-                self.set_font('Helvetica', '', size)
-
             def _strip_md(self, text: str) -> str:
                 """Remove **bold** / *italic* markers, return plain safe string."""
                 import re as _ire
                 t = _ire.sub(r'\*\*([^*]+?)\*\*', r'\1', text)
                 t = _ire.sub(r'\*([^*]+?)\*', r'\1', t)
                 return _safe(t)
+
+            def _mc(self, w: float, h: float, text: str) -> None:
+                """multi_cell with markdown=True and safe Unicode conversion."""
+                self.set_text_color(*DARK)
+                self.multi_cell(w, h, _safe(text), markdown=True)
 
             def render_h1(self, text: str) -> None:
                 self.ln(6)
@@ -441,38 +415,35 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 self.ln(2)
 
             def render_paragraph(self, text: str) -> None:
-                """Render body paragraph with inline **bold** / *italic* support."""
                 import re as _ire
-                # A line that is ENTIRELY **bold** reads like a sub-heading –
-                # promote it to h4 for better visual hierarchy.
+                # A fully-bold line is a standalone label/heading → promote to h4
                 if _ire.fullmatch(r'\*\*[^*]+\*\*', text.strip()):
                     self.render_h4(text.strip()[2:-2])
                     return
-                # Otherwise render inline rich text.
-                saved_lm = self.l_margin
-                self.set_left_margin(self.l_margin)  # no-op; ensures write() wraps correctly
-                self._render_rich(text, size=9.5, line_h=5.5)
+                self.set_font("Helvetica", "", 9.5)
+                self._mc(0, 5.5, text)
                 self.ln(2.5)
-                self.set_left_margin(saved_lm)
 
             def render_bullet(self, text: str, indent: int = 0) -> None:
                 x_base = self.l_margin + 4 + (indent * 5)
-                self.set_x(x_base)
-                bx = self.get_x() + 1
+                # Draw bullet dot at the correct vertical centre of the first line
+                bx = x_base + 1
                 by = self.get_y() + 2.2
                 self.set_fill_color(*BLUE)
                 self.ellipse(bx, by, 1.6, 1.6, style="F")
+                # Indent left margin so wrapped lines align under the text, not the dot
                 text_x = x_base + 5
-                # Temporarily shift left margin so write() wraps at the indent
                 saved_lm = self.l_margin
                 self.set_left_margin(text_x)
                 self.set_x(text_x)
-                self._render_rich(text.strip(), size=9.5, line_h=5)
+                self.set_font("Helvetica", "", 9.5)
+                self._mc(0, 5, text.strip())
                 self.ln(1.5)
                 self.set_left_margin(saved_lm)
 
             def render_numbered(self, num: str, text: str) -> None:
                 x_base = self.l_margin + 3
+                # Draw the number, then flow text starting right after it
                 self.set_x(x_base)
                 self.set_font("Helvetica", "B", 9.5)
                 self.set_text_color(*BLUE)
@@ -480,7 +451,8 @@ def convert_to_pdf(md_path: str, pdf_path: str) -> bool:
                 text_x = self.get_x()
                 saved_lm = self.l_margin
                 self.set_left_margin(text_x)
-                self._render_rich(text.strip(), size=9.5, line_h=5)
+                self.set_font("Helvetica", "", 9.5)
+                self._mc(0, 5, text.strip())
                 self.ln(1.5)
                 self.set_left_margin(saved_lm)
 

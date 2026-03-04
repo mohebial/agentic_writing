@@ -1,0 +1,6 @@
+anthropic
+google-genai
+streamlit
+weasyprint
+fpdf2
+markdown

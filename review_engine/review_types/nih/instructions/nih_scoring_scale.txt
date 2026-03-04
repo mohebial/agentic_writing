@@ -1,0 +1,11 @@
+NIH 9-point scoring scale (use for Overall Impact and each criterion):
+  1 = Exceptional
+  2 = Outstanding
+  3 = Excellent
+  4 = Very Good
+  5 = Good
+  6 = Satisfactory
+  7 = Fair
+  8 = Marginal
+  9 = Poor
+Lower is better. Scores of 1–2 are in the fundable range.

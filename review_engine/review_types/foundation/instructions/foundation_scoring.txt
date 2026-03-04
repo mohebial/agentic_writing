@@ -1,0 +1,10 @@
+Foundation 5-point scoring scale (use for Overall Score and each criterion):
+  5 = Exceptional  – Outstanding on this dimension; rare strength
+  4 = Strong       – Clearly above average; minor gaps only
+  3 = Adequate     – Meets minimum standards; notable but addressable gaps
+  2 = Weak         – Significant concerns that undermine confidence
+  1 = Poor         – Fundamental problems; not addressable without major revision
+
+Higher is better. An overall score of 4–5 is in the fundable range.
+An overall score of 3 may be fundable with conditions.
+Scores of 1–2 indicate the application should be declined.

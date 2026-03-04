@@ -1,53 +1,20 @@
 #!/usr/bin/env python3
 """
-Entry point for ``python -m NIH_review``.
+Backward-compatible entry point for ``python -m NIH_review``.
 
-Dispatches to the Gemini or Claude backend based on --backend.
+Delegates to the unified review_engine with type='nih'.
 
 Usage:
-    python -m NIH_review proposal.pdf --backend gemini
     python -m NIH_review proposal.pdf --backend claude
-    python -m NIH_review proposal.pdf --backend claude --model claude-opus-4-20250514
-    python -m NIH_review --backend gemini --help
+    python -m NIH_review proposal.pdf --backend gemini
 """
 
-from __future__ import annotations
-
 import sys
-import argparse
-from pathlib import Path
 
+# Inject the review type as the first positional arg
+sys.argv.insert(1, "nih")
 
-def main() -> None:
-    # ── Pre-parse just --backend so we can delegate the rest to the backend ──
-    # We use parse_known_args so that backend-specific flags (--model, --output,
-    # --max-rounds, pdf positional) pass through untouched to the backend's own parser.
-    pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument(
-        "--backend", "-b",
-        choices=["gemini", "claude"],
-        default="gemini",
-        help="AI backend to use  (default: gemini)",
-    )
-    known, remaining = pre.parse_known_args()
-
-    # ── Rebuild sys.argv for the backend's main() ─────────────────────────────
-    # Strip --backend / -b and its value so the backend parser doesn't choke.
-    argv = sys.argv[1:]
-    for flag in ("--backend", "-b"):
-        if flag in argv:
-            idx = argv.index(flag)
-            argv = argv[:idx] + argv[idx + 2:]
-
-    sys.argv = [sys.argv[0]] + argv
-
-    if known.backend == "gemini":
-        from NIH_review.gemini import main as _main
-    else:
-        from NIH_review.claude import main as _main
-
-    _main()
-
+from review_engine.__main__ import main  # noqa: E402
 
 if __name__ == "__main__":
     main()

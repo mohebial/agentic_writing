@@ -8,6 +8,7 @@ from ReviewConfig; all API calls go through the backend module.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -25,6 +26,7 @@ from review_engine.helpers import (
     extract_revision,
     build_revised_text,
 )
+from _shared.text import generate_toc
 
 
 # ── ReviewSession ───────────────────────────────────────────────────────────
@@ -83,7 +85,7 @@ class ReviewSession:
         label = self.config.decision.decision_label
         tag = f"{label}{suffix}: {decision}"
         self.out(f"\n{'='*72}\n  {tag}\n{'='*72}\n\n")
-        self.log.append(f"**{tag}**\n")
+        self.log.append(f"### {tag}\n")
 
     def print_revision(
         self,
@@ -290,10 +292,42 @@ class ReviewSession:
 
     # ── Save ─────────────────────────────────────────────────────────────
 
-    def save(self) -> None:
-        Path(self.output_path).write_text(
-            "\n".join(self.log), encoding="utf-8"
+    def _build_final_markdown(self) -> str:
+        """Assemble the final markdown document with TOC.
+
+        Inserts a Table of Contents between the metadata section and
+        the review content.  The TOC is generated from all headings in
+        the assembled document.
+        """
+        # Add completion timestamp to metadata table
+        end_time = datetime.now(timezone.utc)
+        elapsed = end_time - self._start_time
+        minutes = int(elapsed.total_seconds() // 60)
+        seconds = int(elapsed.total_seconds() % 60)
+
+        # Build the document without TOC first so we can scan headings
+        raw = "\n".join(self.log)
+
+        toc_body = generate_toc(raw, max_depth=2)
+        if toc_body:
+            toc_section = f"## Table of Contents\n\n{toc_body}\n"
+            # Insert TOC after metadata (log[0] = title, log[1] = metadata)
+            parts = list(self.log)
+            parts.insert(2, toc_section)
+        else:
+            parts = list(self.log)
+
+        # Append duration to the metadata table (inside log[1])
+        parts[1] = parts[1].rstrip("\n") + (
+            f"| **Completed** | {end_time.strftime('%Y-%m-%d %H:%M UTC')} |\n"
+            f"| **Duration** | {minutes}m {seconds}s |\n"
         )
+
+        return "\n".join(parts)
+
+    def save(self) -> None:
+        final_md = self._build_final_markdown()
+        Path(self.output_path).write_text(final_md, encoding="utf-8")
         self.out(f"Output saved -> {self.output_path}\n")
         pdf_out = str(Path(self.output_path).with_suffix(".pdf"))
         if convert_to_pdf(
@@ -322,11 +356,28 @@ class ReviewSession:
         self._author_system = load_prompt(cfg, cfg.author_prompt_file)
 
         self._setup_backend()
+        self._start_time = datetime.now(timezone.utc)
 
         backend_label = "Claude" if self.backend == "claude" else "Gemini"
         self.log.append(
-            f"# {cfg.display_name} ({backend_label}): {pdf.name}\n\n"
-            f"Model: `{self.model}`\n"
+            f"# {cfg.display_name} ({backend_label}): {pdf.name}\n"
+        )
+
+        # Metadata section — inserted right after the title.
+        # The TOC will be injected between this and the review content
+        # at save-time (see _insert_toc()).
+        mode_label = cfg.iteration.mode.replace("_", " ").title()
+        self.log.append(
+            f"## Review Metadata\n\n"
+            f"| Field | Value |\n"
+            f"|-------|-------|\n"
+            f"| **Backend** | {backend_label} |\n"
+            f"| **Model** | `{self.model}` |\n"
+            f"| **Review Type** | {cfg.display_name} |\n"
+            f"| **Mode** | {mode_label} |\n"
+            f"| **Max Rounds** | {self.max_rounds} |\n"
+            f"| **Document** | {pdf.name} |\n"
+            f"| **Started** | {self._start_time.strftime('%Y-%m-%d %H:%M UTC')} |\n"
         )
 
         try:
@@ -340,7 +391,7 @@ class ReviewSession:
             self._cleanup_backend()
 
         self.save()
-        return "\n".join(self.log)
+        return Path(self.output_path).read_text(encoding="utf-8")
 
     # ── Single Pass (Foundation) ─────────────────────────────────────────
 
@@ -451,7 +502,7 @@ class ReviewSession:
             if decision in cfg.decision.terminal_negative:
                 self.out(banner(f"NOT RECOMMENDED ({decision})", "="))
                 self.log.append(
-                    f"\n**Application {decision} after round {rnd}.**\n"
+                    f"\n### Application {decision} after Round {rnd}\n"
                 )
                 if current_text:
                     self.log.append(
@@ -466,8 +517,7 @@ class ReviewSession:
                     " -- not yet fundable", "="
                 ))
                 self.log.append(
-                    f"\n**Stopped: max rounds ({self.max_rounds}) reached. "
-                    f"Final decision: {decision}**\n"
+                    f"\n### Stopped: Max Rounds ({self.max_rounds}) Reached — Final Decision: {decision}\n"
                 )
                 if current_text:
                     self.log.append(

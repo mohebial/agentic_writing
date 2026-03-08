@@ -23,9 +23,75 @@ def extract_section(text: str, start: str, end: str) -> str | None:
     """Extract text between two markers."""
     s = text.find(start)
     e = text.find(end)
-    if s != -1 and e != -1:
+    if s != -1 and e != -1 and s < e:
         return text[s + len(start) : e].strip()
     return None
+
+
+# ── Table of Contents ────────────────────────────────────────────────────────
+
+def _slugify(text: str) -> str:
+    """Convert heading text to a GitHub-style anchor slug."""
+    slug = text.lower()
+    slug = re.sub(r"[^\w\s-]", "", slug)   # strip non-word chars (keep hyphens)
+    slug = re.sub(r"\s+", "-", slug)        # spaces -> hyphens
+    slug = re.sub(r"-+", "-", slug)         # collapse multiple hyphens
+    return slug.strip("-")
+
+
+def generate_toc(markdown: str, *, max_depth: int = 3) -> str:
+    """Generate a markdown Table of Contents from headings in *markdown*.
+
+    Scans for ATX headings (``# …`` through ``######``) and builds a nested
+    bullet list with anchor links.  Headings inside fenced code blocks are
+    ignored.
+
+    Args:
+        markdown:   The full markdown document.
+        max_depth:  Deepest heading level to include (default 3 = ``###``).
+
+    Returns:
+        A markdown string containing the TOC (without a surrounding heading).
+    """
+    lines = markdown.split("\n")
+    entries: list[tuple[int, str]] = []
+    in_fence = False
+    slug_counts: dict[str, int] = {}
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Track fenced code blocks so we skip headings inside them.
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+
+        m = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if not m:
+            continue
+        level = len(m.group(1))
+        text = m.group(2).strip()
+
+        if level > max_depth:
+            continue
+
+        # Skip the TOC heading itself if it already exists
+        if text.lower() == "table of contents":
+            continue
+
+        slug = _slugify(text)
+        # Handle duplicate headings (GitHub-style: append -1, -2, …)
+        count = slug_counts.get(slug, 0)
+        slug_counts[slug] = count + 1
+        if count:
+            slug = f"{slug}-{count}"
+
+        indent = "  " * (level - 1)
+        entries.append((level, f"{indent}- [{text}](#{slug})"))
+
+    return "\n".join(entry for _, entry in entries)
 
 
 def format_critiques(critiques: dict[str, str]) -> str:

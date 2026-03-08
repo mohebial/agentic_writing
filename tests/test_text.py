@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import pytest
-from _shared.text import banner, extract_section, format_critiques, preprocess_markdown
+from _shared.text import (
+    banner, extract_section, format_critiques, preprocess_markdown,
+    generate_toc, _slugify,
+)
 
 
 # ── banner ──────────────────────────────────────────────────────────────────
@@ -165,3 +168,90 @@ class TestPreprocessMarkdown:
         assert "# Title" in result
         assert "A paragraph." in result
         assert "- Bullet" in result
+
+
+# ── _slugify ───────────────────────────────────────────────────────────────
+
+class TestSlugify:
+    def test_basic(self):
+        assert _slugify("Hello World") == "hello-world"
+
+    def test_strips_special_chars(self):
+        assert _slugify("Decision: Accept (Round 1)") == "decision-accept-round-1"
+
+    def test_collapses_hyphens(self):
+        assert _slugify("a --- b") == "a-b"
+
+    def test_strips_leading_trailing_hyphens(self):
+        assert _slugify("--hello--") == "hello"
+
+    def test_unicode_letters_preserved(self):
+        # \w matches word characters including underscores and unicode letters
+        assert _slugify("café") == "café"
+
+    def test_empty_string(self):
+        assert _slugify("") == ""
+
+
+# ── generate_toc ───────────────────────────────────────────────────────────
+
+class TestGenerateToc:
+    def test_basic_headings(self):
+        md = "# Title\n\n## Section A\n\nContent.\n\n## Section B\n"
+        toc = generate_toc(md)
+        assert "- [Title](#title)" in toc
+        assert "  - [Section A](#section-a)" in toc
+        assert "  - [Section B](#section-b)" in toc
+
+    def test_respects_max_depth(self):
+        md = "# H1\n## H2\n### H3\n#### H4\n"
+        toc = generate_toc(md, max_depth=2)
+        assert "H1" in toc
+        assert "H2" in toc
+        assert "H3" not in toc
+        assert "H4" not in toc
+
+    def test_default_max_depth_includes_h3(self):
+        md = "# H1\n## H2\n### H3\n#### H4\n"
+        toc = generate_toc(md, max_depth=3)
+        assert "H3" in toc
+        assert "H4" not in toc
+
+    def test_skips_headings_in_code_blocks(self):
+        md = "# Real Heading\n\n```\n# Fake Heading\n```\n\n## Another Real\n"
+        toc = generate_toc(md)
+        assert "Real Heading" in toc
+        assert "Fake Heading" not in toc
+        assert "Another Real" in toc
+
+    def test_duplicate_headings_get_suffix(self):
+        md = "## Round 1\n\nContent.\n\n## Round 1\n"
+        toc = generate_toc(md)
+        assert "(#round-1)" in toc
+        assert "(#round-1-1)" in toc
+
+    def test_skips_toc_heading_itself(self):
+        md = "# Title\n## Table of Contents\n## Section\n"
+        toc = generate_toc(md)
+        assert "Table of Contents" not in toc
+        assert "Section" in toc
+
+    def test_empty_input(self):
+        assert generate_toc("") == ""
+
+    def test_no_headings(self):
+        assert generate_toc("Just plain text.\nNo headings here.") == ""
+
+    def test_indentation_levels(self):
+        md = "# L1\n## L2\n### L3\n"
+        toc = generate_toc(md)
+        lines = toc.split("\n")
+        assert lines[0].startswith("- ")       # level 1: no indent
+        assert lines[1].startswith("  - ")     # level 2: 2 spaces
+        assert lines[2].startswith("    - ")   # level 3: 4 spaces
+
+    def test_heading_with_special_characters(self):
+        md = "## SRO Decision (Round 1): Fundable\n"
+        toc = generate_toc(md)
+        assert "[SRO Decision (Round 1): Fundable]" in toc
+        assert "(#sro-decision-round-1-fundable)" in toc

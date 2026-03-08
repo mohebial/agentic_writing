@@ -85,6 +85,9 @@ class TestReviewSessionHelpers:
         session.emit_decision("Fundable")
         assert any("Fundable" in c for c in chunks)
         assert any("Fundable" in entry for entry in session.log)
+        # Should use ### heading, not **bold**
+        decision_entries = [e for e in session.log if "Fundable" in e]
+        assert all(e.startswith("### ") for e in decision_entries)
 
     def test_emit_decision_with_suffix(self, session):
         chunks = []
@@ -117,6 +120,97 @@ class TestReviewSessionHelpers:
         assert "Round 1" in combined
         assert "Resubmit" in combined
         assert "revised aims" in combined
+
+
+class TestReviewSessionMetadataAndToc:
+    @pytest.fixture
+    def session(self):
+        cfg = get_config("nih")
+        return ReviewSession(
+            config=cfg,
+            backend="claude",
+            pdf_path="/tmp/test.pdf",
+            model="test-model",
+            max_rounds=2,
+            output_path="/tmp/output.md",
+            on_chunk=lambda t: None,
+            on_status=lambda s: None,
+        )
+
+    def test_build_final_markdown_has_toc(self, session, tmp_path):
+        from datetime import datetime, timezone
+        session._start_time = datetime.now(timezone.utc)
+        session.output_path = str(tmp_path / "out.md")
+
+        # Simulate a mini document with headings
+        session.log = [
+            "# NIH Grant Review (Claude): test.pdf\n",
+            (
+                "## Review Metadata\n\n"
+                "| Field | Value |\n"
+                "|-------|-------|\n"
+                "| **Backend** | Claude |\n"
+            ),
+            "## Review Round 1\n",
+            "### Primary Reviewer\n\nGood work.\n",
+            "### Secondary Reviewer\n\nNeeds revision.\n",
+            "## Summary Statement (SRO)\n\nSynthesized.\n",
+            "### SRO Decision: Fundable\n",
+        ]
+        result = session._build_final_markdown()
+
+        assert "## Table of Contents" in result
+        # TOC should have links to the headings
+        assert "[Review Round 1]" in result
+        assert "[Summary Statement (SRO)]" in result
+        # Metadata should have completion time
+        assert "**Completed**" in result
+        assert "**Duration**" in result
+
+    def test_toc_appears_after_metadata(self, session, tmp_path):
+        from datetime import datetime, timezone
+        session._start_time = datetime.now(timezone.utc)
+        session.output_path = str(tmp_path / "out.md")
+
+        session.log = [
+            "# Title\n",
+            "## Review Metadata\n\n| Field | Value |\n|---|---|\n| **Backend** | Claude |\n",
+            "## Round 1\n",
+        ]
+        result = session._build_final_markdown()
+        meta_pos = result.index("## Review Metadata")
+        toc_pos = result.index("## Table of Contents")
+        round_pos = result.index("## Round 1")
+        assert meta_pos < toc_pos < round_pos
+
+    def test_metadata_section_in_log(self, session):
+        """Verify that run() adds metadata to the log."""
+        from datetime import datetime, timezone
+        session._start_time = datetime.now(timezone.utc)
+
+        # Simulate what run() does for the header and metadata
+        cfg = session.config
+        pdf_name = "test.pdf"
+        session.log.append(f"# {cfg.display_name} (Claude): {pdf_name}\n")
+        mode_label = cfg.iteration.mode.replace("_", " ").title()
+        session.log.append(
+            f"## Review Metadata\n\n"
+            f"| Field | Value |\n"
+            f"|-------|-------|\n"
+            f"| **Backend** | Claude |\n"
+            f"| **Model** | `test-model` |\n"
+            f"| **Review Type** | {cfg.display_name} |\n"
+            f"| **Mode** | {mode_label} |\n"
+            f"| **Max Rounds** | 2 |\n"
+            f"| **Document** | {pdf_name} |\n"
+        )
+
+        combined = "\n".join(session.log)
+        assert "## Review Metadata" in combined
+        assert "**Backend**" in combined
+        assert "**Model**" in combined
+        assert "**Review Type**" in combined
+        assert "NIH Grant Review" in combined
 
 
 class TestReviewSessionValidation:

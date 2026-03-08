@@ -17,8 +17,8 @@ from _shared import (                          # noqa: F401  (re-exported)
     extract_section,
     format_critiques,
     preprocess_markdown,
-    convert_to_pdf,
 )
+from _shared.pdf import convert_to_pdf         # noqa: F401  (re-exported)
 
 from review_engine.config import ReviewConfig
 

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import base64
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Callable
@@ -50,16 +49,20 @@ _429_RETRY_DELAYS = [60, 120]
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
+class ClaudeSetupError(RuntimeError):
+    """Raised when the Claude backend cannot be initialised."""
+
+
 def validate_startup() -> None:
     """Check that anthropic is installed and ANTHROPIC_API_KEY is set."""
     if not _ANTHROPIC_OK:
-        sys.exit(
-            "Error: missing dependency 'anthropic'.\n"
+        raise ClaudeSetupError(
+            "Missing dependency 'anthropic'.\n"
             "Install it with: pip install anthropic"
         )
     if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.exit(
-            "Error: ANTHROPIC_API_KEY environment variable is not set.\n"
+        raise ClaudeSetupError(
+            "ANTHROPIC_API_KEY environment variable is not set.\n"
             "Export it with: export ANTHROPIC_API_KEY=sk-ant-..."
         )
 
@@ -203,7 +206,12 @@ def stream_agent(
                                     collected.append(text)
                             on_chunk("\n")
                             return "".join(collected), attempt_model
-                        except Exception:
+                        except Exception as retry_exc:
+                            last_exc = retry_exc
+                            on_chunk(
+                                f"\n[429] Retry {i + 1}/{len(_429_RETRY_DELAYS)} "
+                                f"failed: {retry_exc}"
+                            )
                             if i == len(_429_RETRY_DELAYS) - 1:
                                 raise
                     break

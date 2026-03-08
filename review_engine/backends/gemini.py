@@ -8,7 +8,6 @@ All domain-specific behaviour comes from ReviewConfig.
 from __future__ import annotations
 
 import os
-import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -41,16 +40,20 @@ _503_RETRY_DELAYS = [15, 30, 60]
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
+class GeminiSetupError(RuntimeError):
+    """Raised when the Gemini backend cannot be initialised."""
+
+
 def validate_startup() -> None:
     """Check that google-genai is installed and GEMINI_API_KEY is set."""
     if not _GENAI_OK:
-        sys.exit(
-            "Error: missing dependency 'google-genai'.\n"
+        raise GeminiSetupError(
+            "Missing dependency 'google-genai'.\n"
             "Install it with: pip install google-genai"
         )
     if not os.environ.get("GEMINI_API_KEY"):
-        sys.exit(
-            "Error: GEMINI_API_KEY environment variable is not set.\n"
+        raise GeminiSetupError(
+            "GEMINI_API_KEY environment variable is not set.\n"
             "Export it with: export GEMINI_API_KEY=AIza..."
         )
 

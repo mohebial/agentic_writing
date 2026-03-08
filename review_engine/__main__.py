@@ -76,14 +76,17 @@ def main() -> None:
     config = get_config(args.type)
 
     # Validate backend
-    if args.backend == "claude":
-        from review_engine.backends.claude import validate_startup, DEFAULT_MODEL
-        validate_startup()
-        default_model = config.claude_default_model
-    else:
-        from review_engine.backends.gemini import validate_startup, DEFAULT_MODEL
-        validate_startup()
-        default_model = config.gemini_default_model
+    try:
+        if args.backend == "claude":
+            from review_engine.backends.claude import validate_startup, DEFAULT_MODEL
+            validate_startup()
+            default_model = config.claude_default_model
+        else:
+            from review_engine.backends.gemini import validate_startup, DEFAULT_MODEL
+            validate_startup()
+            default_model = config.gemini_default_model
+    except RuntimeError as exc:
+        sys.exit(f"Error: {exc}")
 
     pdf_path = str(Path(args.pdf or _pick_pdf(f"Select PDF {config.document_noun}")).resolve())
     model = args.model or default_model

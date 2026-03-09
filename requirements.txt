@@ -5,3 +5,11 @@ weasyprint
 fpdf2
 markdown
 python-dotenv
+
+# --- Local backend (optional) ---
+# Needed for PDF-to-markdown conversion:
+#   pip install markitdown
+# For GGUF models (e.g. Qwen3.5-27B GGUF):
+#   pip install llama-cpp-python
+# For standard HuggingFace models:
+#   pip install transformers torch

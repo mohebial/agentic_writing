@@ -25,6 +25,12 @@ from review_engine.backends.gemini import (
     DEFAULT_FALLBACK_CHAIN as GEMINI_MODELS,
     DEFAULT_MODEL as GEMINI_DEFAULT,
 )
+from review_engine.backends.local import (
+    DEFAULT_MODEL as LOCAL_DEFAULT,
+    _MARKITDOWN_OK,
+    _LLAMA_CPP_OK,
+    _TRANSFORMERS_OK,
+)
 
 # ── Load review type configs ─────────────────────────────────────────────────
 ensure_types_loaded()
@@ -81,7 +87,7 @@ with st.sidebar:
     # Backend
     backend = st.radio(
         "AI Backend",
-        options=["Claude", "Gemini"],
+        options=["Claude", "Gemini", "Local"],
         horizontal=True,
     ).lower()
 
@@ -89,17 +95,37 @@ with st.sidebar:
     if backend == "claude":
         model_options = CLAUDE_MODELS
         default_model = config.claude_default_model
-    else:
+        default_idx = (
+            model_options.index(default_model) if default_model in model_options else 0
+        )
+        model = st.selectbox(
+            "Model",
+            options=model_options,
+            index=default_idx,
+            help="Select the Claude model to use.",
+        )
+    elif backend == "gemini":
         model_options = config.gemini_fallback_chain
         default_model = config.gemini_default_model
-
-    default_idx = model_options.index(default_model) if default_model in model_options else 0
-    model = st.selectbox(
-        "Model",
-        options=model_options,
-        index=default_idx,
-        help="Select the AI model to use.",
-    )
+        default_idx = (
+            model_options.index(default_model) if default_model in model_options else 0
+        )
+        model = st.selectbox(
+            "Model",
+            options=model_options,
+            index=default_idx,
+            help="Select the Gemini model to use.",
+        )
+    else:  # local
+        model = st.text_input(
+            "Model ID",
+            value=config.local_default_model,
+            help=(
+                "HuggingFace repo ID or local path to a model.\n\n"
+                "GGUF models use llama-cpp-python; "
+                "standard HF models use transformers."
+            ),
+        )
 
     # Max rounds
     if config.iteration.mode == "single_pass":
@@ -116,22 +142,54 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # API key status
+    # API key / dependency status
     if backend == "claude":
         has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
         key_name = "ANTHROPIC_API_KEY"
-    else:
+        if has_key:
+            st.success(f"{key_name} is set")
+        else:
+            st.error(f"{key_name} not set")
+            st.caption(f"Export it in your terminal before running:\n`export {key_name}=...`")
+        ready = has_key
+
+    elif backend == "gemini":
         has_key = bool(os.environ.get("GEMINI_API_KEY"))
         key_name = "GEMINI_API_KEY"
+        if has_key:
+            st.success(f"{key_name} is set")
+        else:
+            st.error(f"{key_name} not set")
+            st.caption(f"Export it in your terminal before running:\n`export {key_name}=...`")
+        ready = has_key
 
-    if has_key:
-        st.success(f"{key_name} is set")
-    else:
-        st.error(f"{key_name} not set")
-        st.caption(f"Export it in your terminal before running:\n`export {key_name}=...`")
+    else:  # local
+        has_converter = _MARKITDOWN_OK
+        has_inference = _LLAMA_CPP_OK or _TRANSFORMERS_OK
+
+        if has_converter and has_inference:
+            st.success("Local dependencies ready")
+        else:
+            if not has_converter:
+                st.error("markitdown not installed")
+                st.caption("`pip install markitdown`")
+            if not has_inference:
+                st.error("No inference backend")
+                st.caption(
+                    "`pip install llama-cpp-python` (GGUF)\n\n"
+                    "`pip install transformers torch` (HF)"
+                )
+        ready = has_converter and has_inference
+
+        with st.expander("Dependency status"):
+            st.markdown(
+                f"- **markitdown**: {'✅' if _MARKITDOWN_OK else '❌'}\n"
+                f"- **llama-cpp-python**: {'✅' if _LLAMA_CPP_OK else '❌'}\n"
+                f"- **transformers**: {'✅' if _TRANSFORMERS_OK else '❌'}"
+            )
 
     # Start button
-    can_start = uploaded_file is not None and has_key and not st.session_state.review_running
+    can_start = uploaded_file is not None and ready and not st.session_state.review_running
     start_clicked = st.button(
         "Start Review",
         type="primary",

@@ -64,6 +64,7 @@ class ReviewSession:
         self._pdf_b64: str | None = None
         self._file_uri: str | None = None
         self._file_name: str | None = None
+        self._manuscript_text: str | None = None  # local: PDF→markdown
 
         # Backend function references (set during _setup_backend)
         self._build_fn = None
@@ -122,7 +123,7 @@ class ReviewSession:
             self.out(banner(f"Loading {pdf.name}  [model: {self.model}]", "="))
             self._pdf_b64 = encode_pdf(self.pdf_path)
             self.out(f"  Encoded {pdf.stat().st_size // 1024} KB -> base64  OK\n\n")
-        else:
+        elif self.backend == "gemini":
             from review_engine.backends.gemini import (
                 make_client, upload_pdf, cleanup_file, build_parts, stream_agent,
             )
@@ -133,11 +134,37 @@ class ReviewSession:
             self.out(banner(f"Uploading {pdf.name}  [model: {self.model}]", "="))
             self._file_uri, self._file_name = upload_pdf(self._client, self.pdf_path)
             self.out(f"  Uploaded -> {self._file_uri}\n\n")
+        elif self.backend == "local":
+            from review_engine.backends.local import (
+                make_client, convert_pdf, build_content, stream_agent,
+                cleanup,
+            )
+            self.out(banner(f"Loading model for {pdf.name}", "="))
+            self._client = make_client(self.model)
+            self.out(
+                f"  Model loaded: {self._client.model_id}"
+                f" ({self._client.backend_type})\n"
+                f"  Device: {self._client.device}\n"
+            )
+            self._build_fn = build_content
+            self._stream_fn = stream_agent
+            self._cleanup_fn = cleanup
+            self.out(banner(f"Converting {pdf.name} to markdown", "="))
+            self._manuscript_text = convert_pdf(self.pdf_path)
+            self.out(
+                f"  Converted {pdf.stat().st_size // 1024} KB PDF -> "
+                f"{len(self._manuscript_text)} chars markdown  OK\n\n"
+            )
+        else:
+            raise ValueError(f"Unknown backend: {self.backend!r}")
 
     def _cleanup_backend(self) -> None:
         if self.backend == "gemini" and self._file_name and self._cleanup_fn:
             self._cleanup_fn(self._client, self._file_name)
             self.out(f"\nCleaned up remote file: {self._file_name}\n")
+        elif self.backend == "local" and self._client and self._cleanup_fn:
+            self._cleanup_fn(self._client)
+            self.out("\nModel resources released.\n")
 
     def build(
         self,
@@ -154,11 +181,21 @@ class ReviewSession:
                 manuscript_text=text,
                 revised_heading=heading,
             )
-        else:
+        elif self.backend == "gemini":
             return self._build_fn(
                 prompt,
                 file_uri=self._file_uri if use_pdf else None,
                 manuscript_text=text,
+                revised_heading=heading,
+            )
+        else:  # local
+            # Round 1: use PDF-converted markdown; Round 2+: use revised text
+            ms_text = text if text is not None else (
+                self._manuscript_text if use_pdf else None
+            )
+            return self._build_fn(
+                prompt,
+                manuscript_text=ms_text,
                 revised_heading=heading,
             )
 
@@ -168,10 +205,15 @@ class ReviewSession:
                 self._client, self.model, sys_prompt, content_blocks, label,
                 on_chunk=self.out,
             )
-        else:
+        elif self.backend == "gemini":
             result, self.model = self._stream_fn(
                 self._client, self.model, sys_prompt, content_blocks, label,
                 fallback_chain=self.config.gemini_fallback_chain,
+                on_chunk=self.out,
+            )
+        else:  # local
+            result, self.model = self._stream_fn(
+                self._client, self.model, sys_prompt, content_blocks, label,
                 on_chunk=self.out,
             )
         return result
@@ -358,7 +400,8 @@ class ReviewSession:
         self._setup_backend()
         self._start_time = datetime.now(timezone.utc)
 
-        backend_label = "Claude" if self.backend == "claude" else "Gemini"
+        _backend_labels = {"claude": "Claude", "gemini": "Gemini", "local": "Local"}
+        backend_label = _backend_labels.get(self.backend, self.backend.title())
         self.log.append(
             f"# {cfg.display_name} ({backend_label}): {pdf.name}\n"
         )

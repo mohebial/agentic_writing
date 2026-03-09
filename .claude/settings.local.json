@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from _shared.text import banner, extract_section, format_critiques, preprocess_markdown; print\\(''text OK''\\)\")",
+      "Bash(python -c \"from _shared import banner, extract_section, format_critiques, preprocess_markdown, convert_to_pdf; print\\(''_shared re-exports OK''\\)\")",
+      "Bash(python -c \"from review_engine.helpers import banner, extract_section, format_critiques, preprocess_markdown, convert_to_pdf, load_prompt, build_combined_reviewer_system, build_challenge_system, parse_combined_critiques, merge_challenge_addenda, parse_decision, extract_revision, build_revised_text; print\\(''helpers OK''\\)\")",
+      "Bash(python -c \"from review_engine.config import ReviewConfig, ReviewerRole, RevisionSection, DecisionConfig, IterationConfig, ensure_types_loaded, get_config; ensure_types_loaded\\(\\); print\\(''config OK, types:'', list\\(get_config\\(n\\).name for n in \\(''nih'',''foundation'',''journal''\\)\\)\\)\")",
+      "Bash(python -c \"from review_engine.engine import run_review, ReviewSession; print\\(''engine OK''\\)\")",
+      "Bash(python -c \"from review_engine.backends.claude import ClaudeSetupError, validate_startup; print\\(''claude backend OK''\\)\")",
+      "Bash(python -c \"from review_engine.backends.gemini import GeminiSetupError, validate_startup; print\\(''gemini backend OK''\\)\")",
+      "Bash(python -m pytest tests/ -v)",
+      "Bash(git add _shared/__init__.py _shared/text.py _shared/pdf.py review_engine/__main__.py review_engine/backends/claude.py review_engine/backends/gemini.py review_engine/engine.py review_engine/helpers.py requirements.txt tests/)",
+      "Bash(git rm -r --cached NIH_review/ foundation_review/ journal_review/)",
+      "Bash(git add NIH_review/ foundation_review/ journal_review/)",
+      "Bash(git reset HEAD -- '*/__pycache__/*' '**/__pycache__/*' 'tests/__pycache__/*' 'NIH_review/__pycache__/*' 'foundation_review/__pycache__/*' 'journal_review/__pycache__/*')",
+      "Bash(git rm --cached -r tests/__pycache__)",
+      "Bash(git rm --cached -r NIH_review/__pycache__ foundation_review/__pycache__ journal_review/__pycache__)",
+      "Bash(git reset HEAD -- tests/__pycache__)",
+      "Bash(git commit:*)",
+      "Bash(git push -u origin claude/hardcore-murdock)",
+      "Bash(gh pr:*)",
+      "Bash(git add _shared/__init__.py _shared/text.py review_engine/engine.py tests/test_engine.py tests/test_text.py)",
+      "Bash(git push origin claude/hardcore-murdock)"
+    ]
+  }
+}

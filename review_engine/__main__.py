@@ -44,7 +44,10 @@ def main() -> None:
             "  %(prog)s nih proposal.pdf --backend claude\n"
             "  %(prog)s foundation proposal.pdf --backend gemini\n"
             "  %(prog)s journal manuscript.pdf --backend claude --model claude-opus-4-6\n"
-            "  %(prog)s nih proposal.pdf --max-rounds 3"
+            "  %(prog)s nih proposal.pdf --max-rounds 3\n"
+            "  %(prog)s nih proposal.pdf --backend local\n"
+            "  %(prog)s nih proposal.pdf --backend local --model /path/to/model.gguf\n"
+            "  %(prog)s nih proposal.pdf --backend local --n-gpu-layers 0  # CPU only"
         ),
     )
     parser.add_argument(
@@ -56,7 +59,8 @@ def main() -> None:
         help="PDF file to review (omit to open file picker)",
     )
     parser.add_argument(
-        "--backend", "-b", choices=["claude", "gemini"], default="gemini",
+        "--backend", "-b", choices=["claude", "gemini", "local"],
+        default="gemini",
         help="AI backend (default: gemini)",
     )
     parser.add_argument(
@@ -71,6 +75,15 @@ def main() -> None:
         "--output", "-o", metavar="FILE",
         help="Output markdown file (default: <pdf_stem>_review.md)",
     )
+    # Local backend options
+    parser.add_argument(
+        "--n-gpu-layers", type=int, default=-1,
+        help="GPU layers to offload (-1 = all, 0 = CPU only). Local backend only.",
+    )
+    parser.add_argument(
+        "--n-ctx", type=int, default=8192,
+        help="Context window size (default: 8192). Local backend only.",
+    )
     args = parser.parse_args()
 
     config = get_config(args.type)
@@ -78,13 +91,17 @@ def main() -> None:
     # Validate backend
     try:
         if args.backend == "claude":
-            from review_engine.backends.claude import validate_startup, DEFAULT_MODEL
+            from review_engine.backends.claude import validate_startup
             validate_startup()
             default_model = config.claude_default_model
-        else:
-            from review_engine.backends.gemini import validate_startup, DEFAULT_MODEL
+        elif args.backend == "gemini":
+            from review_engine.backends.gemini import validate_startup
             validate_startup()
             default_model = config.gemini_default_model
+        else:  # local
+            from review_engine.backends.local import validate_startup
+            validate_startup()
+            default_model = config.local_default_model
     except RuntimeError as exc:
         sys.exit(f"Error: {exc}")
 

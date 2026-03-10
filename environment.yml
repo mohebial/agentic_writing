@@ -1,0 +1,22 @@
+name: agentic_writing
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      # --- Core dependencies ---
+      - anthropic
+      - google-genai
+      - streamlit
+      - weasyprint
+      - fpdf2
+      - markdown
+      - python-dotenv
+
+      # --- Local backend (optional) ---
+      - markitdown
+      - llama-cpp-python
+      - transformers
+      - torch

@@ -51,9 +51,7 @@ except ImportError:
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-DEFAULT_MODEL = (
-    "Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF"
-)
+DEFAULT_MODEL = "Qwen/Qwen3.5-9B"
 MAX_NEW_TOKENS = 16384
 DEFAULT_N_GPU_LAYERS = -1   # offload all layers to GPU
 DEFAULT_N_CTX = 8192        # context window size
@@ -221,7 +219,7 @@ def _load_transformers(model_id: str, device: str) -> LocalModel:
     dtype = torch.float16 if device != "cpu" else torch.float32
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
-        torch_dtype=dtype,
+        dtype=dtype,
         device_map="auto",
     )
     return LocalModel(

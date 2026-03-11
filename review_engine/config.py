@@ -111,9 +111,7 @@ class ReviewConfig:
         "gemini-2.5-flash",
         "gemini-2.5-flash-lite-preview-06-17",
     ])
-    local_default_model: str = (
-        "Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF"
-    )
+    local_default_model: str = "Qwen/Qwen3.5-9B"
 
     # ── Derived helpers ──
 

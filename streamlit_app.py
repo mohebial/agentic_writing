@@ -117,15 +117,37 @@ with st.sidebar:
             help="Select the Gemini model to use.",
         )
     else:  # local
-        model = st.text_input(
-            "Model ID",
-            value=config.local_default_model,
-            help=(
-                "HuggingFace repo ID or local path to a model.\n\n"
-                "GGUF models use llama-cpp-python; "
-                "standard HF models use transformers."
-            ),
+        # Preset local models
+        preset_models = [
+            "Qwen/Qwen3.5-9B",
+            "Qwen/Qwen2.5-7B",
+            "Qwen/Qwen2.5-7B-Instruct",
+            "meta-llama/Llama-2-7b",
+            "gpt2",
+            "Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+            "Custom model...",
+        ]
+        
+        model_choice = st.selectbox(
+            "Model",
+            options=preset_models,
+            index=0,
+            help="Select a preset model or choose 'Custom model...' to enter your own.",
         )
+        
+        if model_choice == "Custom model...":
+            model = st.text_input(
+                "Custom Model ID",
+                value="",
+                placeholder="Enter HuggingFace repo ID or local path",
+                help=(
+                    "HuggingFace repo ID or local file path.\n\n"
+                    "GGUF models use llama-cpp-python; "
+                    "standard HF models use transformers."
+                ),
+            )
+        else:
+            model = model_choice
 
     # Max rounds
     if config.iteration.mode == "single_pass":
@@ -298,17 +320,27 @@ elif st.session_state.review_running:
             status_placeholder.success("Review complete!")
 
         except Exception as e:
-            st.error(f"Review failed: {e}")
-
-        finally:
             st.session_state.review_running = False
             # Cleanup temp PDF
             try:
                 os.unlink(tmp_pdf_path)
             except OSError:
                 pass
-
-        st.rerun()
+            
+            # Display error with full traceback and keep it visible
+            st.error("❌ Review failed")
+            st.exception(e)
+            st.info("Please check the error above and try again with:")
+            st.markdown("- A different model\n- More GPU memory (if available)\n- A smaller model like 'gpt2' for testing")
+            
+            if st.button("🔄 Try Again", key="retry_button"):
+                st.session_state.result_md = None
+                st.session_state.result_pdf_bytes = None
+                st.session_state.output_buffer = ""
+                st.rerun()
+        else:
+            # Only rerun on success
+            st.rerun()
     else:
         st.session_state.review_running = False
         st.error("No PDF found to review. Please try again.")

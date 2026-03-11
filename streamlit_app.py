@@ -16,6 +16,14 @@ load_dotenv()
 
 import streamlit as st
 
+# ── Page config (set first to prevent model loading during imports) ──────────
+
+st.set_page_config(
+    page_title="Multi-Agent Peer Review",
+    page_icon="📝",
+    layout="wide",
+)
+
 from review_engine.config import ensure_types_loaded, get_config, REVIEW_TYPES
 from review_engine.backends.claude import (
     MODEL_FALLBACK_CHAIN as CLAUDE_MODELS,
@@ -34,15 +42,6 @@ from review_engine.backends.local import (
 
 # ── Load review type configs ─────────────────────────────────────────────────
 ensure_types_loaded()
-
-
-# ── Page config ──────────────────────────────────────────────────────────────
-
-st.set_page_config(
-    page_title="Multi-Agent Peer Review",
-    page_icon="📝",
-    layout="wide",
-)
 
 
 # ── Session state defaults ───────────────────────────────────────────────────
@@ -71,6 +70,7 @@ with st.sidebar:
         "Review Type",
         options=list(type_options.keys()),
         help="Choose the type of peer review to run.",
+        key="review_type_select",
     )
     review_type = type_options[selected_display]
     config = get_config(review_type)
@@ -89,6 +89,7 @@ with st.sidebar:
         "AI Backend",
         options=["Claude", "Gemini", "Local"],
         horizontal=True,
+        key="backend_radio",
     ).lower()
 
     # Model
@@ -102,6 +103,7 @@ with st.sidebar:
             "Model",
             options=model_options,
             index=default_idx,
+            key="claude_model_select",
             help="Select the Claude model to use.",
         )
     elif backend == "gemini":
@@ -114,6 +116,7 @@ with st.sidebar:
             "Model",
             options=model_options,
             index=default_idx,
+            key="gemini_model_select",
             help="Select the Gemini model to use.",
         )
     else:  # local
@@ -132,6 +135,7 @@ with st.sidebar:
             "Model",
             options=preset_models,
             index=0,
+            key="local_model_select",
             help="Select a preset model or choose 'Custom model...' to enter your own.",
         )
         
@@ -145,6 +149,7 @@ with st.sidebar:
                     "GGUF models use llama-cpp-python; "
                     "standard HF models use transformers."
                 ),
+                key="local_custom_model_input",
             )
         else:
             model = model_choice

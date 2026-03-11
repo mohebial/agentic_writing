@@ -17,37 +17,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+# Disable Rust-based download backends (hf_transfer, hf_xet) which can crash
+# mid-download on Windows.  The Python-based fallback is slower but reliable.
+os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 from review_engine.helpers import banner
 
-# ── Dependency checks ────────────────────────────────────────────────────────
+# ── Dependency checks (lightweight — no heavy imports at module level) ────────
+# We use importlib to check availability without triggering model downloads
+# that some versions of transformers / llama-cpp perform on import.
 
-try:
-    import torch
-    _TORCH_OK = True
-except ImportError:
-    torch = None  # type: ignore[assignment]
-    _TORCH_OK = False
+import importlib.util as _ilu
 
-try:
-    from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
-    _TRANSFORMERS_OK = True
-except ImportError:
-    AutoModelForCausalLM = AutoTokenizer = TextIteratorStreamer = None
-    _TRANSFORMERS_OK = False
+_TORCH_OK = _ilu.find_spec("torch") is not None
+_TRANSFORMERS_OK = _ilu.find_spec("transformers") is not None
+_LLAMA_CPP_OK = _ilu.find_spec("llama_cpp") is not None
+_MARKITDOWN_OK = _ilu.find_spec("markitdown") is not None
 
-try:
-    from llama_cpp import Llama
-    _LLAMA_CPP_OK = True
-except ImportError:
-    Llama = None  # type: ignore[assignment]
-    _LLAMA_CPP_OK = False
-
-try:
-    from markitdown import MarkItDown
-    _MARKITDOWN_OK = True
-except ImportError:
-    MarkItDown = None  # type: ignore[assignment]
-    _MARKITDOWN_OK = False
+del _ilu  # keep module namespace clean
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
@@ -101,6 +89,7 @@ def _detect_device() -> str:
     """Detect the best available compute device."""
     if not _TORCH_OK:
         return "cpu"
+    import torch
     if torch.cuda.is_available():
         return "cuda"
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
@@ -111,6 +100,7 @@ def _detect_device() -> str:
 def _check_memory(device: str, model_id: str) -> None:
     """Warn if GPU memory looks insufficient."""
     if device == "cuda" and _TORCH_OK:
+        import torch
         free_gb = torch.cuda.mem_get_info()[0] / (1024 ** 3)
         total_gb = torch.cuda.mem_get_info()[1] / (1024 ** 3)
         if free_gb < 8:
@@ -181,6 +171,8 @@ def _load_llama_cpp(
     gguf_filename: str | None,
 ) -> LocalModel:
     """Load a GGUF model via llama-cpp-python."""
+    from llama_cpp import Llama
+
     local_path = Path(model_id)
     if local_path.is_file() and model_id.lower().endswith(".gguf"):
         model = Llama(
@@ -201,7 +193,7 @@ def _load_llama_cpp(
 
     device = (
         "cuda"
-        if n_gpu_layers != 0 and _TORCH_OK and torch.cuda.is_available()
+        if n_gpu_layers != 0 and _TORCH_OK and __import__("torch").cuda.is_available()
         else "cpu"
     )
     return LocalModel(
@@ -215,12 +207,16 @@ def _load_llama_cpp(
 
 def _load_transformers(model_id: str, device: str) -> LocalModel:
     """Load a standard HF model via transformers."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    dtype = torch.float16 if device != "cpu" else torch.float32
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         dtype=dtype,
         device_map="auto",
+        low_cpu_mem_usage=True,
     )
     return LocalModel(
         model=model,
@@ -238,6 +234,8 @@ def convert_pdf(pdf_path: str) -> str:
 
     Returns the markdown text content of the PDF.
     """
+    from markitdown import MarkItDown
+
     converter = MarkItDown()
     result = converter.convert(pdf_path)
     return result.text_content
@@ -331,6 +329,8 @@ def _stream_transformers(
 ) -> list[str]:
     """Stream tokens from a transformers model via TextIteratorStreamer."""
     import threading
+    import time
+    from transformers import TextIteratorStreamer
 
     # Apply chat template if the tokenizer supports it, otherwise
     # concatenate with simple role tags.
@@ -360,13 +360,44 @@ def _stream_transformers(
     thread = threading.Thread(target=model.generate, kwargs=generation_kwargs)
     thread.start()
 
+    # Show a waiting indicator while the first token is being generated
+    first_token = True
+    t0 = time.time()
+    print("  Generating (waiting for first token", end="", flush=True)
+    wait_printed = True
+
     collected: list[str] = []
+    token_count = 0
+    last_status = time.time()
     for text in streamer:
+        if first_token:
+            elapsed = time.time() - t0
+            print(f" — {elapsed:.1f}s)\n", flush=True)
+            wait_printed = False
+            first_token = False
         if text:
             on_chunk(text)
             collected.append(text)
+            token_count += 1
+            # Print a progress update every 10 seconds
+            now = time.time()
+            if now - last_status >= 10:
+                elapsed = now - t0
+                tps = token_count / elapsed if elapsed > 0 else 0
+                print(
+                    f"\r  [{token_count} tokens, {elapsed:.0f}s, {tps:.1f} tok/s]",
+                    end="", flush=True,
+                )
+                last_status = now
+
+    if wait_printed:
+        # Generation finished with no tokens (edge case)
+        print(")", flush=True)
 
     thread.join()
+    elapsed = time.time() - t0
+    tps = token_count / elapsed if elapsed > 0 else 0
+    print(f"\n  Done: {token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s)", flush=True)
     return collected
 
 
@@ -375,6 +406,7 @@ def _stream_transformers(
 def cleanup(client: LocalModel) -> None:
     """Release model resources and free VRAM."""
     if client.backend_type == "transformers" and _TORCH_OK:
+        import torch
         del client.model
         del client.tokenizer
         if torch.cuda.is_available():

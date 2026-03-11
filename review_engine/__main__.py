@@ -13,7 +13,11 @@ import argparse
 import sys
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from review_engine.config import ensure_types_loaded, get_config, REVIEW_TYPES
+
+load_dotenv()
 
 
 def _pick_pdf(title: str = "Select PDF") -> str:

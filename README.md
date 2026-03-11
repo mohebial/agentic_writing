@@ -226,7 +226,12 @@ python -m review_engine nih proposal.pdf --backend claude
 python -m review_engine journal manuscript.pdf --backend gemini
 
 # Foundation review with a specific Claude model
-python -m review_engine foundation proposal.pdf --backend claude --model claude-opus-4-6
+python -m review_engine nih "C:\Users\alimo\OneDrive - UW-Madison\0 - Lab\Grants\2026\BRF\Research_Strategy.pdf" --backend claude --model claude-haiku-4-5-20251001
+```bash
+# Foundation review with a specific Gemini model
+python -m review_engine foundation "C:\Users\alimo\OneDrive - UW-Madison\0 - Lab\Grants\2026\BRF\Research_Strategy.pdf" --backend gemini --model gemini-3.0-flash
+```
+
 
 # NIH review with 3 rounds
 python -m review_engine nih proposal.pdf --max-rounds 3
@@ -239,6 +244,11 @@ python -m review_engine nih proposal.pdf --backend local --model ~/models/qwen.g
 
 # Local model on CPU only
 python -m review_engine nih proposal.pdf --backend local --n-gpu-layers 0
+
+
+# Local Model
+python -m review_engine nih "C:\Users\alimo\OneDrive - UW-Madison\0 - Lab\Grants\2026\BRF\Research_Strategy.pdf" --backend local --model QWEN/Qwen3.5-9B
+
 ```
 
 ### Python API

@@ -1,4 +1,4 @@
-name: agentic_writing
+name: agentic_review
 channels:
   - conda-forge
   - defaults
@@ -16,7 +16,14 @@ dependencies:
       - python-dotenv
 
       # --- Local backend (optional) ---
-      - markitdown
+      - "markitdown[all]"
       - llama-cpp-python
       - transformers
-      - torch
+      - --extra-index-url https://download.pytorch.org/whl/cu128
+      - torch==2.10.0+cu128
+      - accelerate
+
+# To create the environment, run the following command in your terminal:
+# cd c:\GitHub\agentic_writing
+# conda env create -f environment.yml
+# conda activate agentic_review

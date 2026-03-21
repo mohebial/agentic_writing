@@ -1,9 +1,11 @@
 """
 Local open-source LLM backend using HuggingFace models.
 
-Supports two inference paths:
+Supports three inference paths:
   - GGUF models via llama-cpp-python  (recommended for quantised models)
   - Standard HF models via transformers (AutoModelForCausalLM)
+  - OpenAI-compatible API servers (e.g. LM Studio) for models that
+    cannot be loaded natively on the current platform
 
 PDF handling uses Microsoft's markitdown for PDF-to-markdown conversion,
 since local LLMs cannot process binary PDF files natively.
@@ -22,6 +24,21 @@ from typing import Any, Callable
 os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "0")
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
+# Disable torch.compile / dynamo on Windows — triton's JIT compilation
+# requires a C compiler that is typically not available.
+if os.name == "nt":
+    os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
+    # Triton needs a C compiler for JIT kernel compilation.  Point it to
+    # MSVC's cl.exe if available and CC is not already set.
+    if "CC" not in os.environ:
+        import glob as _glob
+        _cl_matches = _glob.glob(
+            r"C:\Program Files*\Microsoft Visual Studio\**\cl.exe",
+            recursive=True,
+        )
+        if _cl_matches:
+            os.environ["CC"] = _cl_matches[0]
+
 from review_engine.helpers import banner
 
 # ── Dependency checks (lightweight — no heavy imports at module level) ────────
@@ -34,6 +51,7 @@ _TORCH_OK = _ilu.find_spec("torch") is not None
 _TRANSFORMERS_OK = _ilu.find_spec("transformers") is not None
 _LLAMA_CPP_OK = _ilu.find_spec("llama_cpp") is not None
 _MARKITDOWN_OK = _ilu.find_spec("markitdown") is not None
+_OPENAI_OK = _ilu.find_spec("openai") is not None
 
 del _ilu  # keep module namespace clean
 
@@ -43,6 +61,7 @@ DEFAULT_MODEL = "Qwen/Qwen3.5-9B"
 MAX_NEW_TOKENS = 16384
 DEFAULT_N_GPU_LAYERS = -1   # offload all layers to GPU
 DEFAULT_N_CTX = 8192        # context window size
+LMSTUDIO_BASE_URL = "http://localhost:1234/v1"  # LM Studio default
 
 
 # ── Data model ───────────────────────────────────────────────────────────────
@@ -51,11 +70,11 @@ DEFAULT_N_CTX = 8192        # context window size
 class LocalModel:
     """Container for a loaded local model and its metadata."""
 
-    model: Any                     # Llama instance or HF model
+    model: Any                     # Llama instance, HF model, or OpenAI client
     tokenizer: Any | None          # AutoTokenizer (HF path only)
-    backend_type: str              # "llama_cpp" or "transformers"
-    model_id: str                  # HF repo ID or local path
-    device: str                    # "cuda", "mps", "cpu"
+    backend_type: str              # "llama_cpp", "transformers", or "openai_compat"
+    model_id: str                  # HF repo ID, local path, or API model name
+    device: str                    # "cuda", "mps", "cpu", or "api"
 
 
 # ── Public API ───────────────────────────────────────────────────────────────
@@ -126,6 +145,31 @@ def _is_gguf_model(model_id: str) -> bool:
     return False
 
 
+def _is_qwen3_model(model_id: str) -> bool:
+    """Check if *model_id* is a Qwen3 variant that supports thinking mode."""
+    return "qwen3" in model_id.lower()
+
+
+def _needs_fla(model_id: str) -> bool:
+    """Check whether a model requires flash-linear-attention (fla) for inference.
+
+    Models using hybrid linear-attention architectures (e.g. Qwen3.5) import
+    fla triton kernels which cannot run on Windows.
+    """
+    try:
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(model_id)
+        return getattr(cfg, "model_type", "") in ("qwen3_5",)
+    except Exception:
+        return False
+
+
+_GGUF_EQUIVALENTS: dict[str, tuple[str, str]] = {
+    # model_type -> (gguf_repo, specific_gguf_filename)
+    "qwen3_5": ("unsloth/Qwen3.5-9B-GGUF", "*Q4_K_M.gguf"),
+}
+
+
 # ── Model loading ────────────────────────────────────────────────────────────
 
 def make_client(
@@ -147,6 +191,48 @@ def make_client(
     device = _detect_device()
     _check_memory(device, model_id)
 
+    # On Windows, models that require fla (flash-linear-attention) cannot use
+    # the transformers backend because fla's triton kernels don't compile.
+    # Try the LM Studio OpenAI-compatible API first (user likely already has
+    # the model loaded), then fall back to a GGUF equivalent via llama-cpp.
+    if os.name == "nt" and not _is_gguf_model(model_id) and _needs_fla(model_id):
+        lm = _try_lmstudio(model_id)
+        if lm is not None:
+            return lm
+
+        # LM Studio not available — fall back to GGUF equivalent
+        if not _LLAMA_CPP_OK:
+            raise LocalSetupError(
+                f"Model '{model_id}' requires flash-linear-attention (fla) which "
+                "uses triton kernels that cannot compile on Windows.\n"
+                "Either:\n"
+                "  1. Load the model in LM Studio and leave its local server running, or\n"
+                "  2. Install llama-cpp-python to use a GGUF version:\n"
+                "     pip install llama-cpp-python"
+            )
+        try:
+            from transformers import AutoConfig
+            model_type = AutoConfig.from_pretrained(model_id).model_type
+        except Exception:
+            model_type = None
+        gguf_repo, gguf_glob = _GGUF_EQUIVALENTS.get(
+            model_type, (None, None)
+        )
+        if gguf_repo is None:
+            raise LocalSetupError(
+                f"Model '{model_id}' requires fla triton kernels which cannot "
+                "compile on Windows, and no GGUF equivalent is known.\n"
+                "Please load the model in LM Studio or specify a GGUF model directly."
+            )
+        banner(
+            f"  '{model_id}' requires fla (triton) — not supported on Windows.\n"
+            f"  LM Studio not detected. Auto-switching to GGUF: {gguf_repo}"
+        )
+        return _load_llama_cpp(
+            gguf_repo, n_gpu_layers, n_ctx,
+            gguf_filename or gguf_glob,
+        )
+
     if _is_gguf_model(model_id):
         if not _LLAMA_CPP_OK:
             raise LocalSetupError(
@@ -162,6 +248,52 @@ def make_client(
             "Install with: pip install transformers torch"
         )
     return _load_transformers(model_id, device)
+
+
+def _try_lmstudio(model_id: str) -> LocalModel | None:
+    """Try to connect to LM Studio's OpenAI-compatible API.
+
+    Returns a :class:`LocalModel` if LM Studio is running and has a model
+    loaded, otherwise ``None``.
+    """
+    if not _OPENAI_OK:
+        return None
+    try:
+        import httpx
+        from openai import OpenAI
+
+        # Quick connectivity check (short timeout)
+        client = OpenAI(
+            base_url=LMSTUDIO_BASE_URL,
+            api_key="lm-studio",
+            timeout=httpx.Timeout(5.0, connect=2.0),
+        )
+        models = client.models.list()
+        if not models.data:
+            return None
+
+        # Use the first loaded model (LM Studio typically has one)
+        api_model = models.data[0].id
+
+        # Re-create client with normal timeout for inference
+        client = OpenAI(
+            base_url=LMSTUDIO_BASE_URL,
+            api_key="lm-studio",
+        )
+
+        banner(
+            f"  '{model_id}' requires fla (triton) — not supported on Windows.\n"
+            f"  Connected to LM Studio API -> model: {api_model}"
+        )
+        return LocalModel(
+            model=client,
+            tokenizer=None,
+            backend_type="openai_compat",
+            model_id=api_model,
+            device="api",
+        )
+    except Exception:
+        return None
 
 
 def _load_llama_cpp(
@@ -205,19 +337,79 @@ def _load_llama_cpp(
     )
 
 
+def _patch_fla_cpu_context() -> None:
+    """Patch fla's ``custom_device_ctx`` so it works when tensors are on CPU.
+
+    ``torch.cpu`` has no ``.device()`` context manager (unlike ``torch.cuda``),
+    which crashes fla on Windows when layers spill to CPU.  We replace it with
+    a no-op context manager for the CPU case.
+    """
+    try:
+        import fla.utils as _fla_utils
+        _orig = _fla_utils.custom_device_ctx
+
+        def _safe_device_ctx(index: int):
+            import torch
+            if _fla_utils.device_torch_lib is torch.cpu:
+                from contextlib import nullcontext
+                return nullcontext()
+            return _orig(index)
+
+        _fla_utils.custom_device_ctx = _safe_device_ctx
+    except Exception:
+        pass  # fla not installed — nothing to patch
+
+
 def _load_transformers(model_id: str, device: str) -> LocalModel:
     """Load a standard HF model via transformers."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
+    _patch_fla_cpu_context()
+
     tokenizer = AutoTokenizer.from_pretrained(model_id)
     dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+
+    load_kwargs: dict[str, Any] = dict(
         dtype=dtype,
         device_map="auto",
         low_cpu_mem_usage=True,
     )
+
+    # If the model won't fit in VRAM at full precision, use 4-bit quantisation.
+    if device == "cuda":
+        free_gb = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+        try:
+            from transformers import AutoConfig
+            cfg = AutoConfig.from_pretrained(model_id)
+            # Rough estimate: 2 bytes per param for bf16/fp16
+            param_count = getattr(cfg, "num_parameters", None)
+            if param_count is None:
+                # Fallback heuristic from hidden_size * num_layers
+                h = getattr(cfg, "hidden_size", 4096)
+                n = getattr(cfg, "num_hidden_layers", 32)
+                param_count = h * h * 4 * n  # very rough
+            model_gb = (param_count * 2) / (1024 ** 3)
+        except Exception:
+            model_gb = 0
+
+        if model_gb > free_gb * 0.9:
+            try:
+                from transformers import BitsAndBytesConfig
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=dtype,
+                    bnb_4bit_quant_type="nf4",
+                )
+                banner(f"  4-bit quantisation enabled (model ~{model_gb:.0f} GB, free VRAM ~{free_gb:.0f} GB)")
+            except ImportError:
+                warnings.warn(
+                    f"Model needs ~{model_gb:.0f} GB but only {free_gb:.0f} GB VRAM free. "
+                    "Install bitsandbytes for automatic 4-bit quantisation: "
+                    "pip install bitsandbytes"
+                )
+
+    model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
     return LocalModel(
         model=model,
         tokenizer=tokenizer,
@@ -263,6 +455,88 @@ def build_content(
     return [{"role": "user", "content": combined}]
 
 
+# ── Qwen3 thinking-mode helpers ──────────────────────────────────────────────
+
+class _ThinkFilter:
+    """Filter that strips ``<think>...</think>`` blocks from streamed text.
+
+    Buffers tokens while inside a ``<think>`` block and discards them
+    when the closing ``</think>`` tag is found.
+    """
+
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside_think = False
+
+    def feed(self, text: str) -> str:
+        """Process incoming text and return only non-thinking content."""
+        self._buffer += text
+        output: list[str] = []
+
+        while self._buffer:
+            if self._inside_think:
+                end_idx = self._buffer.find("</think>")
+                if end_idx == -1:
+                    # Still inside think block — consume everything
+                    self._buffer = ""
+                    break
+                # Skip past closing tag
+                self._buffer = self._buffer[end_idx + len("</think>"):]
+                self._inside_think = False
+            else:
+                start_idx = self._buffer.find("<think>")
+                if start_idx == -1:
+                    # No think tag — hold back a possible partial match
+                    safe = self._safe_emit_length()
+                    if safe > 0:
+                        output.append(self._buffer[:safe])
+                        self._buffer = self._buffer[safe:]
+                    break
+                else:
+                    # Emit content before <think>
+                    if start_idx > 0:
+                        output.append(self._buffer[:start_idx])
+                    self._buffer = self._buffer[start_idx + len("<think>"):]
+                    self._inside_think = True
+
+        return "".join(output)
+
+    def flush(self) -> str:
+        """Flush any remaining buffered content."""
+        if self._inside_think:
+            self._buffer = ""
+            return ""
+        result = self._buffer
+        self._buffer = ""
+        return result
+
+    def _safe_emit_length(self) -> int:
+        """Return the length of buffer that can safely be emitted.
+
+        Holds back a suffix that could be the start of a ``<think>`` tag.
+        """
+        tag = "<think>"
+        buf = self._buffer
+        for i in range(1, len(tag)):
+            if buf.endswith(tag[:i]):
+                return len(buf) - i
+        return len(buf)
+
+
+def _inject_no_think(messages: list[dict]) -> list[dict]:
+    """Append ``/no_think`` to the last user message to disable Qwen3 thinking.
+
+    Qwen3 chat templates recognise this directive and skip the
+    ``<think>`` generation phase entirely, saving significant compute.
+    """
+    messages = [m.copy() for m in messages]
+    for m in reversed(messages):
+        if m["role"] == "user":
+            m["content"] = m["content"].rstrip() + "\n/no_think"
+            break
+    return messages
+
+
 # ── Streaming inference ──────────────────────────────────────────────────────
 
 def stream_agent(
@@ -288,24 +562,85 @@ def stream_agent(
 
     messages = [{"role": "system", "content": system}] + content
 
-    if client.backend_type == "llama_cpp":
-        collected = _stream_llama_cpp(client.model, messages, on_chunk)
+    # Qwen3 models default to a verbose "thinking" mode that generates
+    # thousands of hidden tokens before the real answer.  Disable it.
+    qwen3 = _is_qwen3_model(client.model_id)
+    if qwen3:
+        messages = _inject_no_think(messages)
+
+    if client.backend_type == "openai_compat":
+        collected = _stream_openai_compat(
+            client.model, client.model_id, messages, on_chunk,
+            filter_thinking=qwen3,
+        )
+    elif client.backend_type == "llama_cpp":
+        collected = _stream_llama_cpp(
+            client.model, messages, on_chunk, filter_thinking=qwen3,
+        )
     else:
         collected = _stream_transformers(
             client.model, client.tokenizer, messages, on_chunk,
+            filter_thinking=qwen3,
         )
 
     on_chunk("\n")
     return "".join(collected), model
 
 
+def _stream_openai_compat(
+    client: Any,
+    model_id: str,
+    messages: list[dict],
+    on_chunk: Callable[[str], None],
+    *,
+    filter_thinking: bool = False,
+) -> list[str]:
+    """Stream tokens from an OpenAI-compatible API (e.g. LM Studio)."""
+    collected: list[str] = []
+    think_filter = _ThinkFilter() if filter_thinking else None
+
+    extra_body: dict[str, Any] = {}
+    if filter_thinking:
+        extra_body["enable_thinking"] = False
+
+    response = client.chat.completions.create(
+        model=model_id,
+        messages=messages,
+        max_tokens=MAX_NEW_TOKENS,
+        temperature=1.0,
+        stream=True,
+        **(dict(extra_body=extra_body) if extra_body else {}),
+    )
+    for chunk in response:
+        delta = chunk.choices[0].delta
+        text = delta.content or ""
+        if text:
+            if think_filter:
+                text = think_filter.feed(text)
+            if text:
+                on_chunk(text)
+                collected.append(text)
+
+    if think_filter:
+        remaining = think_filter.flush()
+        if remaining:
+            on_chunk(remaining)
+            collected.append(remaining)
+
+    return collected
+
+
 def _stream_llama_cpp(
     model: Any,
     messages: list[dict],
     on_chunk: Callable[[str], None],
+    *,
+    filter_thinking: bool = False,
 ) -> list[str]:
     """Stream tokens from a llama-cpp model."""
     collected: list[str] = []
+    think_filter = _ThinkFilter() if filter_thinking else None
+
     response = model.create_chat_completion(
         messages=messages,
         max_tokens=MAX_NEW_TOKENS,
@@ -316,8 +651,18 @@ def _stream_llama_cpp(
         delta = chunk["choices"][0].get("delta", {})
         text = delta.get("content", "")
         if text:
-            on_chunk(text)
-            collected.append(text)
+            if think_filter:
+                text = think_filter.feed(text)
+            if text:
+                on_chunk(text)
+                collected.append(text)
+
+    if think_filter:
+        remaining = think_filter.flush()
+        if remaining:
+            on_chunk(remaining)
+            collected.append(remaining)
+
     return collected
 
 
@@ -326,17 +671,27 @@ def _stream_transformers(
     tokenizer: Any,
     messages: list[dict],
     on_chunk: Callable[[str], None],
+    *,
+    filter_thinking: bool = False,
 ) -> list[str]:
     """Stream tokens from a transformers model via TextIteratorStreamer."""
     import threading
     import time
     from transformers import TextIteratorStreamer
 
+    think_filter = _ThinkFilter() if filter_thinking else None
+
     # Apply chat template if the tokenizer supports it, otherwise
     # concatenate with simple role tags.
     if hasattr(tokenizer, "apply_chat_template"):
+        template_kwargs: dict[str, Any] = dict(
+            tokenize=False, add_generation_prompt=True,
+        )
+        # Qwen3 tokenizers accept enable_thinking to skip the <think> phase.
+        if filter_thinking:
+            template_kwargs["enable_thinking"] = False
         input_text = tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
+            messages, **template_kwargs,
         )
     else:
         input_text = "\n\n".join(
@@ -376,8 +731,11 @@ def _stream_transformers(
             wait_printed = False
             first_token = False
         if text:
-            on_chunk(text)
-            collected.append(text)
+            if think_filter:
+                text = think_filter.feed(text)
+            if text:
+                on_chunk(text)
+                collected.append(text)
             token_count += 1
             # Print a progress update every 10 seconds
             now = time.time()
@@ -395,6 +753,13 @@ def _stream_transformers(
         print(")", flush=True)
 
     thread.join()
+
+    if think_filter:
+        remaining = think_filter.flush()
+        if remaining:
+            on_chunk(remaining)
+            collected.append(remaining)
+
     elapsed = time.time() - t0
     tps = token_count / elapsed if elapsed > 0 else 0
     print(f"\n  Done: {token_count} tokens in {elapsed:.1f}s ({tps:.1f} tok/s)", flush=True)
@@ -405,7 +770,9 @@ def _stream_transformers(
 
 def cleanup(client: LocalModel) -> None:
     """Release model resources and free VRAM."""
-    if client.backend_type == "transformers" and _TORCH_OK:
+    if client.backend_type == "openai_compat":
+        pass  # nothing to release — API client only
+    elif client.backend_type == "transformers" and _TORCH_OK:
         import torch
         del client.model
         del client.tokenizer

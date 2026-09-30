@@ -162,8 +162,7 @@ def stream_agent(
                 status = getattr(exc, "status_code", None)
 
                 is_overloaded = (
-                    (_anthropic and isinstance(exc, _anthropic.OverloadedError))
-                    or status == 529
+                    status == 529
                     or "529" in exc_str
                     or "overloaded" in exc_str.lower()
                 )
@@ -224,6 +223,12 @@ def stream_agent(
                     )
                     last_exc = exc
                     break
+
+                if status == 400 and "credit balance is too low" in exc_str.lower():
+                    raise RuntimeError(
+                        "Anthropic API error: Your credit balance is too low. "
+                        "Please add credits at https://console.anthropic.com/settings/billing"
+                    ) from exc
 
                 raise
 

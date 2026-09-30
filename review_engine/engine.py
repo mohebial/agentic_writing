@@ -115,8 +115,9 @@ class ReviewSession:
         pdf = Path(self.pdf_path)
         if self.backend == "claude":
             from review_engine.backends.claude import (
-                make_client, encode_pdf, build_content, stream_agent,
+                make_client, encode_pdf, build_content, stream_agent, validate_startup,
             )
+            validate_startup()
             self._client = make_client()
             self._build_fn = build_content
             self._stream_fn = stream_agent
@@ -125,8 +126,9 @@ class ReviewSession:
             self.out(f"  Encoded {pdf.stat().st_size // 1024} KB -> base64  OK\n\n")
         elif self.backend == "gemini":
             from review_engine.backends.gemini import (
-                make_client, upload_pdf, cleanup_file, build_parts, stream_agent,
+                make_client, upload_pdf, cleanup_file, build_parts, stream_agent, validate_startup,
             )
+            validate_startup()
             self._client = make_client()
             self._build_fn = build_parts
             self._stream_fn = stream_agent
@@ -137,8 +139,9 @@ class ReviewSession:
         elif self.backend == "local":
             from review_engine.backends.local import (
                 make_client, convert_pdf, build_content, stream_agent,
-                cleanup,
+                cleanup, validate_startup,
             )
+            validate_startup()
             self.out(banner(f"Loading model for {pdf.name}", "="))
             self._client = make_client(self.model)
             self.out(

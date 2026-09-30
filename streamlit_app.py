@@ -122,12 +122,17 @@ with st.sidebar:
     else:  # local
         # Preset local models
         preset_models = [
+            "google/gemma-4-E4B-it",
+            "google/gemma-4-31B",
             "Qwen/Qwen3.5-9B",
             "Qwen/Qwen2.5-7B",
             "Qwen/Qwen2.5-7B-Instruct",
             "meta-llama/Llama-2-7b",
             "gpt2",
             "Jackrong/Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-GGUF",
+            "google/gemma-3-27b-it",
+            "google/gemma-3-12b-it",
+            "google/gemma-3-4b-it",
             "Custom model...",
         ]
         

@@ -229,7 +229,7 @@ python -m review_engine journal manuscript.pdf --backend gemini
 python -m review_engine nih "C:\Users\alimo\OneDrive - UW-Madison\0 - Lab\Grants\2026\BRF\Research_Strategy.pdf" --backend claude --model claude-haiku-4-5-20251001
 ```bash
 # Foundation review with a specific Gemini model
-python -m review_engine foundation "C:\Users\alimo\OneDrive - UW-Madison\0 - Lab\Grants\2026\BRF\Research_Strategy.pdf" --backend gemini --model gemini-3.0-flash
+python -m review_engine foundation "/Users/ali/Library/CloudStorage/OneDrive-UW-Madison/0 - Lab/Grants/2026/BRF/Research_Plan_Draft_v4.pdf" --backend gemini --model gemini-3-flash-preview  
 ```
 
 

@@ -409,7 +409,17 @@ def _load_transformers(model_id: str, device: str) -> LocalModel:
                     "pip install bitsandbytes"
                 )
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_id, **load_kwargs)
+    except ValueError as exc:
+        if "does not recognize this architecture" in str(exc) or "model type" in str(exc).lower():
+            raise LocalSetupError(
+                f"Your version of transformers does not support '{model_id}'.\n"
+                "The model architecture is too new. Upgrade with:\n\n"
+                "  pip install git+https://github.com/huggingface/transformers.git\n\n"
+                f"Original error: {exc}"
+            ) from exc
+        raise
     return LocalModel(
         model=model,
         tokenizer=tokenizer,
